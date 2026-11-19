@@ -39,6 +39,12 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      allowedHosts: ['polio.orhb.gov.et', '127.0.0.1', 'localhost'],
+    },
+    preview: {
+      host: '127.0.0.1',
+      port: 3000,
+      allowedHosts: ['polio.orhb.gov.et', '127.0.0.1', 'localhost'],
     },
   };
 });

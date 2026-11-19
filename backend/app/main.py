@@ -6,9 +6,10 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import re
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import func
@@ -30,6 +31,7 @@ from .models import (
 from .parser import parse_campaign_file
 
 app = FastAPI(title=settings.APP_NAME, version="1.0.0")
+settings.validate_security_config()
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +40,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_json_handler(_request: Request, exc: HTTPException):
+    msg = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": msg},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_json_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "error": "Invalid request payload."},
+    )
+
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
@@ -69,6 +90,93 @@ ROLE_PERMISSIONS = {
 }
 
 
+NAV_MODULE_REGISTRY = [
+    {"key": "live_command_center", "label": "Live Command Center", "path": "/", "group": "operations", "requiredPermission": "view_dashboard"},
+    {"key": "command_room", "label": "Command Room (5-Screen)", "path": "/command-room", "group": "operations", "requiredPermission": "view_command_room"},
+    {"key": "command_center", "label": "Command Center", "path": "/command-center", "group": "operations", "requiredPermission": "view_dashboard"},
+    {"key": "campaign_overview", "label": "Campaign Overview", "path": "/campaign-overview", "group": "operations", "requiredPermission": "view_dashboard"},
+    {"key": "geographic_performance", "label": "Geographic Performance", "path": "/geographic-performance", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "daily_vaccination", "label": "Daily Vaccination", "path": "/daily-vaccination", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "vaccine_utilization", "label": "Vaccine Utilization", "path": "/vaccine-utilization", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "alerts", "label": "AFP & AEFI Alerts", "path": "/alerts", "group": "operations", "requiredPermission": "view_dashboard"},
+    {"key": "social_mobilization", "label": "Social Mobilization", "path": "/social-mobilization", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "zero_dose", "label": "Zero Dose & Under-vacc.", "path": "/zero-dose", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "reporting_completeness", "label": "Reporting Completeness", "path": "/reporting-completeness", "group": "analytics", "requiredPermission": "view_dashboard"},
+    {"key": "data_upload", "label": "Data Upload Center", "path": "/data-upload", "group": "admin", "requiredPermission": "upload_data"},
+    {"key": "reports_analytics", "label": "Reports & Analytics", "path": "/reports-analytics", "group": "analytics", "requiredPermission": "export_reports"},
+    {"key": "user_management", "label": "User Management", "path": "/user-management", "group": "admin", "requiredPermission": "manage_users"},
+    {"key": "system_settings", "label": "System Settings", "path": "/system-settings", "group": "admin", "requiredPermission": "manage_settings"},
+    {"key": "branding_appearance", "label": "Branding & Appearance", "path": "/branding", "group": "admin", "requiredPermission": "manage_branding"},
+]
+
+
+def serialize_user(user: User) -> Dict[str, Any]:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "fullName": user.full_name,
+        "email": user.email,
+        "role": user.role,
+        "assignedZone": user.assigned_zone,
+        "assignedWoreda": user.assigned_woreda,
+        "isActive": bool(user.is_active),
+        "mustChangePassword": bool(getattr(user, "must_change_password", False)),
+        "createdAt": user.created_at.isoformat() + "Z" if user.created_at else "",
+        "lastLoginAt": user.last_login_at.isoformat() + "Z" if user.last_login_at else None,
+    }
+
+
+def build_auth_context(user: Optional[User], db: Session) -> Dict[str, Any]:
+    guest_setting = (
+        db.query(SystemSetting)
+        .filter(SystemSetting.key == "guestPublicOverviewEnabled")
+        .first()
+    )
+    guest_enabled = (guest_setting.value == "true") if guest_setting else False
+    if not user:
+        return {
+            "authenticated": False,
+            "user": {
+                "id": 0,
+                "username": "guest",
+                "fullName": "Guest Visitor",
+                "email": "",
+                "role": "viewer",
+                "assignedZone": None,
+                "assignedWoreda": None,
+                "isActive": True,
+                "mustChangePassword": False,
+                "createdAt": "",
+                "lastLoginAt": None,
+            },
+            "permissions": ["view_public_overview"] if guest_enabled else [],
+            "navigation": [],
+            "defaultLanding": "public_overview" if guest_enabled else "login",
+            "guestPublicOverviewEnabled": guest_enabled,
+        }
+
+    perms = ROLE_PERMISSIONS.get(user.role, [])
+    perms_set = set(perms)
+    if bool(getattr(user, "must_change_password", False)):
+        navigation = []
+        default_landing = "change_password"
+    elif user.role == "command_room_viewer":
+        navigation = []
+        default_landing = "command_room"
+    else:
+        navigation = [item for item in NAV_MODULE_REGISTRY if item["requiredPermission"] in perms_set]
+        default_landing = "live_command_center"
+
+    return {
+        "authenticated": True,
+        "user": serialize_user(user),
+        "permissions": perms,
+        "navigation": navigation,
+        "defaultLanding": default_landing,
+        "guestPublicOverviewEnabled": guest_enabled,
+    }
+
+
 async def broadcast_sse(event_type: str, actor: str, message: str) -> None:
     payload = json.dumps(
         {
@@ -84,22 +192,43 @@ async def broadcast_sse(event_type: str, actor: str, message: str) -> None:
 
 def get_optional_user(
     authorization: Optional[str] = Header(default=None),
+    opcms_token: Optional[str] = Cookie(default=None),
     db: Session = Depends(get_db),
 ) -> Optional[User]:
-    if not authorization or not authorization.startswith("Bearer "):
+    token: Optional[str] = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+    elif opcms_token:
+        token = opcms_token.strip()
+    if not token:
         return None
-    token = authorization[7:].strip()
     try:
         claims = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(claims.get("sub", 0))
-    except (JWTError, ValueError):
+        token_version = int(claims.get("tv", -1))
+    except (JWTError, ValueError, TypeError):
         return None
-    return db.query(User).filter(User.id == user_id, User.is_active == True).first()
+    user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
+    if not user:
+        return None
+    current_tv = int(getattr(user, "token_version", 1) or 1)
+    if token_version != current_tv:
+        return None
+    return user
 
 
-def require_authenticated(user: Optional[User] = Depends(get_optional_user)) -> User:
+def require_session_only(user: Optional[User] = Depends(get_optional_user)) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def require_authenticated(user: User = Depends(require_session_only)) -> User:
+    if bool(getattr(user, "must_change_password", False)):
+        raise HTTPException(
+            status_code=403,
+            detail="Password update required. Please change your initial password before accessing protected resources.",
+        )
     return user
 
 
@@ -283,55 +412,169 @@ async def sse_events(current_user: User = Depends(require_authenticated)):
 
 
 @app.get("/api/auth/me")
-def auth_me(user: Optional[User] = Depends(get_optional_user)):
-    if not user:
-        return {"authenticated": False, "permissions": [], "navigation": [], "defaultLanding": "login"}
-    return {
-        "authenticated": True,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "fullName": user.full_name,
-            "role": user.role,
-            "mustChangePassword": bool(getattr(user, "must_change_password", False)),
-        },
-        "permissions": ROLE_PERMISSIONS.get(user.role, []),
-        "defaultLanding": "command_room" if user.role == "command_room_viewer" else "live_command_center",
-    }
+def auth_me(
+    user: Optional[User] = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+):
+    return build_auth_context(user, db)
 
 
 @app.post("/api/auth/login")
-def login(payload: Dict[str, str], db: Session = Depends(get_db)):
+def login(
+    payload: Dict[str, str],
+    response: Response,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     username = (payload.get("username") or "").strip()
     password = payload.get("password") or ""
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username/email and password are required.")
+
     user = (
         db.query(User)
-        .filter((User.username == username) | (User.email == username))
+        .filter(
+            (func.lower(User.username) == username.lower())
+            | (func.lower(User.email) == username.lower())
+        )
         .first()
     )
     if not user or not user.is_active or not pwd_context.verify(password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        db.add(
+            AuditLog(
+                username=username or "anonymous",
+                user_role="viewer",
+                action="LOGIN_FAILED",
+                entity_type="user",
+                entity_id=username or "unknown",
+                details=f'Failed login attempt for "{username}".',
+                ip_address=request.client.host if request.client else "127.0.0.1",
+            )
+        )
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     user.last_login_at = datetime.utcnow()
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            username=user.username,
+            user_role=user.role,
+            action="LOGIN_SUCCESS",
+            entity_type="user",
+            entity_id=str(user.id),
+            details=f'User "{user.username}" ({user.role}) signed in.',
+            ip_address=request.client.host if request.client else "127.0.0.1",
+        )
+    )
     db.commit()
+
+    token_version = int(getattr(user, "token_version", 1) or 1)
     token = jwt.encode(
         {
             "sub": str(user.id),
             "role": user.role,
+            "tv": token_version,
             "exp": datetime.utcnow() + timedelta(days=7),
         },
         settings.SECRET_KEY,
         algorithm=ALGORITHM,
     )
+
+    response.set_cookie(
+        key="opcms_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=60 * 60 * 24 * 7,
+    )
+
+    ctx = build_auth_context(user, db)
+    return {"token": token, **ctx}
+
+
+@app.post("/api/auth/logout")
+def logout(
+    response: Response,
+    request: Request,
+    user: Optional[User] = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+):
+    if user:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                username=user.username,
+                user_role=user.role,
+                action="LOGOUT",
+                entity_type="user",
+                entity_id=str(user.id),
+                details=f'User "{user.username}" signed out.',
+                ip_address=request.client.host if request.client else "127.0.0.1",
+            )
+        )
+        db.commit()
+    response.delete_cookie(key="opcms_token", path="/")
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    payload: Dict[str, str],
+    response: Response,
+    request: Request,
+    current_user: User = Depends(require_session_only),
+    db: Session = Depends(get_db),
+):
+    current_password = payload.get("currentPassword") or ""
+    new_password = payload.get("newPassword") or ""
+    if not current_password or not new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Current password and new password are required.",
+        )
+
+    if (
+        len(new_password) < 12
+        or not re.search(r"[A-Za-z]", new_password)
+        or not re.search(r"[0-9!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?]", new_password)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be at least 12 characters and include letters plus numbers or symbols.",
+        )
+
+    if not pwd_context.verify(current_password, current_user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    if current_password == new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password.",
+        )
+
+    current_user.password_hash = pwd_context.hash(new_password)
+    current_user.must_change_password = False
+    current_user.token_version = int(getattr(current_user, "token_version", 1) or 1) + 1
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            username=current_user.username,
+            user_role=current_user.role,
+            action="PASSWORD_CHANGED",
+            entity_type="user",
+            entity_id=str(current_user.id),
+            details=f'User "{current_user.username}" changed password and invalidated prior tokens.',
+            ip_address=request.client.host if request.client else "127.0.0.1",
+        )
+    )
+    db.commit()
+    response.delete_cookie(key="opcms_token", path="/")
     return {
-        "token": token,
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "fullName": user.full_name,
-            "role": user.role,
-            "mustChangePassword": bool(getattr(user, "must_change_password", False)),
-        },
+        "ok": True,
+        "requiresRelogin": True,
+        "message": "Password changed successfully. Please sign in again with your new password.",
     }
 
 

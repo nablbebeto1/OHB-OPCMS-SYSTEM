@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "0003_branding_assets"
-down_revision = "0002_command_room_and_viewer_role"
+down_revision = "0002_command_room_viewer"
 branch_labels = None
 depends_on = None
 

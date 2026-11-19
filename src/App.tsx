@@ -22,7 +22,12 @@ import {
   Tv,
   AlertTriangle,
 } from 'lucide-react';
-import { api, type DashboardSummaryResponse, type FilterParams } from './api/client';
+import {
+  api,
+  apiUrl,
+  type DashboardSummaryResponse,
+  type FilterParams,
+} from './api/client';
 import type {
   AdminLocation,
   AdvancedAnalyticsData,
@@ -38,7 +43,12 @@ import type {
   SurveillanceAlert,
   UserAccount,
 } from './types/opcms';
-import { AuthModal, ChangePasswordModal, GuestLoginView } from './components/AuthModal';
+import {
+  AuthModal,
+  ChangePasswordModal,
+  GuestLoginView,
+  MandatoryPasswordChangeView,
+} from './components/AuthModal';
 import { BrandLogo } from './components/BrandLogo';
 import { LiveCommandCenterView } from './components/views/LiveCommandCenterView';
 import { CommandRoomView } from './components/views/CommandRoomView';
@@ -155,6 +165,7 @@ export default function App() {
   const [publicOverview, setPublicOverview] = useState<PublicOverviewResponse | null>(null);
   const [branding, setBranding] = useState<BrandingConfig | null>(null);
   const [routeNotice, setRouteNotice] = useState<string | null>(null);
+  const [authStatusMessage, setAuthStatusMessage] = useState<string | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
@@ -191,19 +202,25 @@ export default function App() {
     timestamp: string;
   } | null>(null);
 
+  const mustChangePassword = authenticated && Boolean(currentUser.mustChangePassword);
   const isCommandRoomViewer =
-    authenticated && currentUser.role === 'command_room_viewer';
-  const canUploadData = authenticated && permissions.includes('upload_data');
-  const canViewDashboard = authenticated && permissions.includes('view_dashboard');
-  const canViewCommandRoom = authenticated && permissions.includes('view_command_room');
-  const canManageBranding = authenticated && permissions.includes('manage_branding');
+    authenticated && !mustChangePassword && currentUser.role === 'command_room_viewer';
+  const canUploadData =
+    authenticated && !mustChangePassword && permissions.includes('upload_data');
+  const canViewDashboard =
+    authenticated && !mustChangePassword && permissions.includes('view_dashboard');
+  const canViewCommandRoom =
+    authenticated && !mustChangePassword && permissions.includes('view_command_room');
+  const canManageBranding =
+    authenticated && !mustChangePassword && permissions.includes('manage_branding');
 
   const applyBrandingUpdate = useCallback((cfg: BrandingConfig) => {
     setBranding(cfg);
     const link = document.getElementById('app-favicon') as HTMLLinkElement | null;
     if (link) {
       const targetHref =
-        cfg.faviconUrl || `/api/branding/favicon?v=${encodeURIComponent(cfg.updatedAt || 'default')}`;
+        cfg.faviconUrl ||
+        apiUrl(`/api/branding/favicon?v=${encodeURIComponent(cfg.updatedAt || 'default')}`);
       link.href = targetHref;
     }
   }, []);
@@ -234,6 +251,15 @@ export default function App() {
       return;
     }
 
+    setAuthStatusMessage(null);
+
+    if (ctx.user.mustChangePassword) {
+      if (window.location.pathname !== '/change-password') {
+        window.history.replaceState(null, '', '/change-password');
+      }
+      return;
+    }
+
     if (ctx.user.role === 'command_room_viewer') {
       setActiveNav('command_room');
       if (window.location.pathname !== '/command-room') {
@@ -247,8 +273,9 @@ export default function App() {
           ? 'live_command_center'
           : (ctx.navigation?.[0]?.key as NavKey | undefined)) ?? 'live_command_center';
         setActiveNav(fallback);
+        const origPath = window.location.pathname;
         window.history.replaceState(null, '', NAV_PATHS[fallback] ?? '/');
-        if (window.location.pathname !== '/' && window.location.pathname !== '/login') {
+        if (origPath !== '/' && origPath !== '/login' && origPath !== '/change-password') {
           setRouteNotice(
             `Access restricted: your role (${ctx.user.role}) does not permit access to that module.`
           );
@@ -301,6 +328,12 @@ export default function App() {
         }
         return;
       }
+      if (mustChangePassword) {
+        if (window.location.pathname !== '/change-password') {
+          window.history.replaceState(null, '', '/change-password');
+        }
+        return;
+      }
       if (isCommandRoomViewer) {
         setActiveNav('command_room');
         if (window.location.pathname !== '/command-room') {
@@ -327,7 +360,7 @@ export default function App() {
     enforceRoute();
     window.addEventListener('popstate', enforceRoute);
     return () => window.removeEventListener('popstate', enforceRoute);
-  }, [authLoaded, authenticated, isCommandRoomViewer, navigation, currentUser.role]);
+  }, [authLoaded, authenticated, mustChangePassword, isCommandRoomViewer, navigation, currentUser.role]);
 
   // Keep React fullscreen state synced with browser Escape / fullscreenchange
   useEffect(() => {
@@ -391,6 +424,11 @@ export default function App() {
       return;
     }
 
+    if (mustChangePassword) {
+      setLoading(false);
+      return;
+    }
+
     setSyncStatus('syncing');
     try {
       if (isCommandRoomViewer) {
@@ -435,6 +473,7 @@ export default function App() {
   }, [
     authLoaded,
     authenticated,
+    mustChangePassword,
     guestPublicOverviewEnabled,
     filter,
     campaignId,
@@ -456,7 +495,7 @@ export default function App() {
   }, [fetchBranding, applyAuthContext]);
 
   useEffect(() => {
-    if (!authenticated || isCommandRoomViewer) return;
+    if (!authenticated || mustChangePassword || isCommandRoomViewer) return;
     api
       .getCampaigns()
       .then((list) => {
@@ -464,7 +503,7 @@ export default function App() {
         if (list.length > 0) setCampaignId(list[0].id);
       })
       .catch(() => {});
-  }, [authenticated, isCommandRoomViewer]);
+  }, [authenticated, mustChangePassword, isCommandRoomViewer]);
 
   useEffect(() => {
     fetchAllData();
@@ -472,7 +511,7 @@ export default function App() {
 
   // Periodic background data refresh for Command Room large-screen display
   useEffect(() => {
-    if (!authenticated) return;
+    if (!authenticated || mustChangePassword) return;
     if (activeNav !== 'command_room' && !isCommandRoomViewer) return;
     const sec = Math.max(10, commandRoomState?.settings.commandRoomDataRefreshSec ?? 30);
     const timer = window.setInterval(() => {
@@ -481,6 +520,7 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [
     authenticated,
+    mustChangePassword,
     activeNav,
     isCommandRoomViewer,
     commandRoomState?.settings.commandRoomDataRefreshSec,
@@ -489,13 +529,13 @@ export default function App() {
 
   // Real-time Server-Sent Events subscription (authenticated sessions only)
   useEffect(() => {
-    if (!authenticated) {
+    if (!authenticated || mustChangePassword) {
       sseConnectedRef.current = false;
       setSseConnected(false);
       return;
     }
 
-    const es = new EventSource('/api/events');
+    const es = new EventSource(apiUrl('/api/events'));
 
     es.addEventListener('connected', () => {
       sseConnectedRef.current = true;
@@ -540,13 +580,41 @@ export default function App() {
     return () => {
       es.close();
     };
-  }, [authenticated, fetchAllData, fetchBranding, isCommandRoomViewer]);
+  }, [authenticated, mustChangePassword, fetchAllData, fetchBranding, isCommandRoomViewer]);
 
   useEffect(() => {
     if (!liveToast) return;
     const timer = setTimeout(() => setLiveToast(null), 8000);
     return () => clearTimeout(timer);
   }, [liveToast]);
+
+  const handlePasswordChangedRelogin = useCallback(
+    async (message: string) => {
+      localStorage.removeItem('opcms_token');
+      await api.logout().catch(() => {});
+      setCommandRoomFullscreen(false);
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+      setAuthenticated(false);
+      setCurrentUser(GUEST_USER);
+      setPermissions([]);
+      setNavigation([]);
+      setSummary(null);
+      setCommandRoomState(null);
+      setAdvanced(null);
+      setLocations([]);
+      setReports([]);
+      setAlerts([]);
+      setImports([]);
+      setBoundaries([]);
+      setCampaigns([]);
+      setPasswordModalOpen(false);
+      setAuthStatusMessage(message);
+      window.history.replaceState(null, '', '/');
+    },
+    []
+  );
 
   async function handleLogout() {
     await api.logout().catch(() => {});
@@ -581,7 +649,6 @@ export default function App() {
   const activeNavItem =
     navigation.find((i) => i.key === activeNav) ?? navigation[0] ?? null;
   const activeCampaign = campaigns.find((c) => c.id === campaignId);
-  const mustChangePassword = authenticated && Boolean(currentUser.mustChangePassword);
 
   if (!authLoaded) {
     return (
@@ -599,10 +666,23 @@ export default function App() {
         guestPublicOverviewEnabled={guestPublicOverviewEnabled}
         publicOverview={publicOverview}
         accessDeniedNotice={routeNotice}
+        statusMessage={authStatusMessage}
         onAuthenticated={(authRes) => {
           applyAuthContext(authRes);
           fetchBranding();
         }}
+      />
+    );
+  }
+
+  // Strict Mandatory Password Change Screen: blocks ALL protected views until changed & re-authenticated
+  if (mustChangePassword) {
+    return (
+      <MandatoryPasswordChangeView
+        branding={branding}
+        currentUser={currentUser}
+        onPasswordChangedRelogin={handlePasswordChangedRelogin}
+        onLogout={handleLogout}
       />
     );
   }
@@ -634,11 +714,11 @@ export default function App() {
         )}
 
         <ChangePasswordModal
-          open={mustChangePassword || passwordModalOpen}
-          forced={mustChangePassword}
+          open={passwordModalOpen}
+          forced={false}
           username={currentUser.username}
           onClose={() => setPasswordModalOpen(false)}
-          onPasswordChanged={(updated) => setCurrentUser(updated)}
+          onPasswordChangedRelogin={handlePasswordChangedRelogin}
         />
       </div>
     );
@@ -1126,11 +1206,11 @@ export default function App() {
       />
 
       <ChangePasswordModal
-        open={mustChangePassword || passwordModalOpen}
-        forced={mustChangePassword}
+        open={passwordModalOpen}
+        forced={false}
         username={currentUser.username}
         onClose={() => setPasswordModalOpen(false)}
-        onPasswordChanged={(updated) => setCurrentUser(updated)}
+        onPasswordChangedRelogin={handlePasswordChangedRelogin}
       />
     </div>
   );

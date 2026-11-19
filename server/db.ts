@@ -38,6 +38,7 @@ export function initDatabase(): void {
       assigned_woreda TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
       must_change_password INTEGER NOT NULL DEFAULT 0,
+      token_version INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_login_at TEXT
     );
@@ -290,5 +291,11 @@ export function initDatabase(): void {
     } finally {
       db.exec('PRAGMA foreign_keys = ON;');
     }
+  }
+
+  // Idempotent migration: add token_version column if absent
+  const cols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'token_version')) {
+    db.exec(`ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1;`);
   }
 }

@@ -8,7 +8,7 @@ import {
   Download,
   RotateCcw,
 } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, apiUrl } from '../../api/client';
 import type {
   ImportBatch,
   ImportMode,
@@ -129,14 +129,14 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <a
-            href="/api/templates/official?format=xlsx"
+            href={apiUrl('/api/templates/official?format=xlsx')}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg"
           >
             <Download className="w-3.5 h-3.5" />
             Template (.xlsx)
           </a>
           <a
-            href="/api/templates/official?format=csv"
+            href={apiUrl('/api/templates/official?format=csv')}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg"
           >
             <Download className="w-3.5 h-3.5" />
@@ -564,7 +564,7 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
                     </td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-2">
                       <a
-                        href={`/api/imports/${b.id}/download`}
+                        href={apiUrl(`/api/imports/${b.id}/download`)}
                         className="text-[#3A99CF] hover:underline font-medium"
                       >
                         Original

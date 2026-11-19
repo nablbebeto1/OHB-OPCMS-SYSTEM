@@ -1,13 +1,25 @@
-from pydantic_settings import BaseSettings
+import logging
 from typing import List
+from pydantic_settings import BaseSettings
+
+logger = logging.getLogger("ohb-opcms.config")
+
+INSECURE_SECRET_PLACEHOLDERS = {
+    "",
+    "change-this-to-a-long-random-hex-secret",
+    "change-this-to-a-long-random-secret",
+    "secret",
+    "changeme",
+}
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "Oromia Polio Campaign Management System (OHB-OPCMS)"
+    ENVIRONMENT: str = "development"
     BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 4949
     FRONTEND_HOST: str = "127.0.0.1"
-    FRONTEND_PORT: int = 1119
+    FRONTEND_PORT: int = 3000
 
     POSTGRES_HOST: str = "127.0.0.1"
     POSTGRES_PORT: int = 5432
@@ -39,8 +51,22 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
+    def is_secret_key_configured(self) -> bool:
+        val = (self.SECRET_KEY or "").strip()
+        return len(val) >= 32 and val not in INSECURE_SECRET_PLACEHOLDERS
+
+    def validate_security_config(self) -> None:
+        if not self.is_secret_key_configured():
+            msg = (
+                "SECRET_KEY is missing, shorter than 32 characters, or set to the default placeholder. "
+                "Configure a cryptographically random SECRET_KEY in /opt/ohb-opcms/.env."
+            )
+            if self.ENVIRONMENT.strip().lower() == "production":
+                raise RuntimeError(msg)
+            logger.warning(msg)
+
     class Config:
-        env_file = ".env"
+        env_file = (".env", "../.env")
         extra = "ignore"
 
 

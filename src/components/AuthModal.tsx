@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Lock, X, KeyRound, ShieldCheck, Globe } from 'lucide-react';
+import { Lock, X, KeyRound, ShieldCheck, Globe, LogOut, CheckCircle2 } from 'lucide-react';
 import { api } from '../api/client';
 import { BrandLogo } from './BrandLogo';
 import type {
@@ -166,12 +166,14 @@ export const GuestLoginView: React.FC<{
   guestPublicOverviewEnabled: boolean;
   publicOverview: PublicOverviewResponse | null;
   accessDeniedNotice?: string | null;
+  statusMessage?: string | null;
   onAuthenticated: (auth: AuthMeResponse) => void;
 }> = ({
   branding,
   guestPublicOverviewEnabled,
   publicOverview,
   accessDeniedNotice,
+  statusMessage,
   onAuthenticated,
 }) => {
   return (
@@ -222,6 +224,12 @@ export const GuestLoginView: React.FC<{
             </div>
 
             <div className="p-6">
+              {statusMessage ? (
+                <div className="mb-4 p-3 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{statusMessage}</span>
+                </div>
+              ) : null}
               {accessDeniedNotice ? (
                 <div className="mb-4 p-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg">
                   {accessDeniedNotice}
@@ -303,6 +311,181 @@ export const GuestLoginView: React.FC<{
   );
 };
 
+const PasswordChangeForm: React.FC<{
+  forced?: boolean;
+  username?: string;
+  onSuccess: (message: string) => void;
+}> = ({ forced = false, username, onSuccess }) => {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    if (newPassword.length < 12) {
+      setError('New password must be at least 12 characters.');
+      return;
+    }
+    if (!/[A-Za-z]/.test(newPassword) || !/[0-9!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]/.test(newPassword)) {
+      setError('New password must include letters plus numbers or symbols.');
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setError('New password must be different from your current password.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await api.changePassword(currentPassword, newPassword);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      onSuccess(
+        res.message ||
+          'Password changed successfully. Please sign in again with your new password.'
+      );
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      {forced ? (
+        <div className="p-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg">
+          Account <strong>{username}</strong> is required to set a new personal password (minimum 12 characters with letters and numbers/symbols) before accessing any protected system module. All prior tokens will be invalidated after update.
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
+          {error}
+        </div>
+      ) : null}
+
+      <div>
+        <label className="block text-xs font-medium text-slate-700 mb-1">
+          Current Password
+        </label>
+        <input
+          type="password"
+          required
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-slate-700 mb-1">
+          New Password (min 12 chars, letters + numbers/symbols)
+        </label>
+        <input
+          type="password"
+          required
+          minLength={12}
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-slate-700 mb-1">
+          Confirm New Password
+        </label>
+        <input
+          type="password"
+          required
+          minLength={12}
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
+        />
+      </div>
+
+      <button
+        type="submit"
+        disabled={submitting}
+        className="w-full py-2.5 px-4 text-sm font-medium text-white bg-[#485EA9] hover:bg-[#3a4d8f] disabled:opacity-60 rounded-lg transition-colors"
+      >
+        {submitting ? 'Updating Password...' : 'Update Password & Re-Authenticate'}
+      </button>
+    </form>
+  );
+};
+
+export const MandatoryPasswordChangeView: React.FC<{
+  branding: BrandingConfig | null;
+  currentUser: UserAccount;
+  onPasswordChangedRelogin: (message: string) => void;
+  onLogout: () => void;
+}> = ({ branding, currentUser, onPasswordChangedRelogin, onLogout }) => {
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
+      <header className="bg-white border-b border-slate-200 px-6 py-3.5">
+        <div className="max-w-4xl mx-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <BrandLogo variant="header" branding={branding} />
+            <div>
+              <div className="text-sm font-bold tracking-tight text-[#485EA9]">
+                OROMIA POLIO CAMPAIGN MANAGEMENT SYSTEM (OHB-OPCMS)
+              </div>
+              <div className="text-xs text-slate-500">
+                Mandatory First-Login Security Verification
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg whitespace-nowrap"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            Sign Out ({currentUser.username})
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 flex items-center justify-center p-6">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-200 bg-slate-50/70 flex flex-col items-center text-center gap-2.5">
+            <BrandLogo variant="login" branding={branding} />
+            <div className="flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-[#485EA9]" />
+              <h1 className="text-base font-bold text-slate-900">
+                Password Update Required
+              </h1>
+            </div>
+          </div>
+          <div className="p-6">
+            <PasswordChangeForm
+              forced
+              username={currentUser.username}
+              onSuccess={onPasswordChangedRelogin}
+            />
+          </div>
+        </div>
+      </main>
+
+      <footer className="border-t border-slate-200 bg-white px-6 py-3 text-center text-[11px] text-slate-500">
+        Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System
+      </footer>
+    </div>
+  );
+};
+
 export const AuthModal: React.FC<AuthModalProps> = ({
   open,
   branding = null,
@@ -359,7 +542,7 @@ interface ChangePasswordModalProps {
   forced?: boolean;
   username?: string;
   onClose: () => void;
-  onPasswordChanged: (user: UserAccount) => void;
+  onPasswordChangedRelogin: (message: string) => void;
 }
 
 export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
@@ -367,37 +550,9 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
   forced = false,
   username,
   onClose,
-  onPasswordChanged,
+  onPasswordChangedRelogin,
 }) => {
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
   if (!open) return null;
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    if (newPassword !== confirmPassword) {
-      setError('New password and confirmation do not match.');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await api.changePassword(currentPassword, newPassword);
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      onPasswordChanged(res.user);
-      onClose();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   return (
     <div
@@ -429,66 +584,16 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
           ) : null}
         </div>
 
-        <form onSubmit={handleSubmit} className="p-5 space-y-4">
-          {forced ? (
-            <div className="p-3 text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg">
-              Account <strong>{username}</strong> must set a personal password (minimum 10 characters with letters and numbers or symbols) before continuing to the Command Room display.
-            </div>
-          ) : null}
-
-          {error ? (
-            <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
-              {error}
-            </div>
-          ) : null}
-
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              Current Password
-            </label>
-            <input
-              type="password"
-              required
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              New Password (min 10 chars, letters + numbers/symbols)
-            </label>
-            <input
-              type="password"
-              required
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-700 mb-1">
-              Confirm New Password
-            </label>
-            <input
-              type="password"
-              required
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full py-2.5 px-4 text-sm font-medium text-white bg-[#485EA9] hover:bg-[#3a4d8f] disabled:opacity-60 rounded-lg transition-colors"
-          >
-            {submitting ? 'Updating Password...' : 'Update Password'}
-          </button>
-        </form>
+        <div className="p-5">
+          <PasswordChangeForm
+            forced={forced}
+            username={username}
+            onSuccess={(msg) => {
+              onClose();
+              onPasswordChangedRelogin(msg);
+            }}
+          />
+        </div>
       </div>
     </div>
   );

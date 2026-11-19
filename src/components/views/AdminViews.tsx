@@ -13,7 +13,7 @@ import {
   Globe,
   Eye,
 } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, apiUrl } from '../../api/client';
 import { BrandLogo } from '../BrandLogo';
 import type {
   AuditLogEntry,
@@ -230,7 +230,7 @@ export const BrandingSettingsPanel: React.FC<{
 
   const effectivePreviewLogoSrc = stagedLogoUrl ?? branding?.logoUrl ?? null;
   const effectivePreviewFaviconSrc =
-    stagedFaviconUrl ?? branding?.faviconUrl ?? '/api/branding/favicon';
+    stagedFaviconUrl ?? branding?.faviconUrl ?? apiUrl('/api/branding/favicon');
 
   return (
     <div className="space-y-6">

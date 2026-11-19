@@ -8,9 +8,29 @@ import type {
   UserRole,
 } from '../src/types/opcms.ts';
 
-const AUTH_SECRET =
-  process.env.OPCMS_SESSION_SECRET ||
-  'ohb-opcms-self-hosted-session-signing-key-2026';
+const INSECURE_SECRETS = new Set([
+  '',
+  'change-this-to-a-long-random-hex-secret',
+  'change-this-to-a-long-random-secret',
+  'ohb-opcms-self-hosted-session-signing-key-2026',
+  'secret',
+  'changeme',
+]);
+
+function resolveAuthSecret(): string {
+  const configured = (process.env.SECRET_KEY || process.env.OPCMS_SESSION_SECRET || '').trim();
+  if (configured && !INSECURE_SECRETS.has(configured) && configured.length >= 32) {
+    return configured;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'SECRET_KEY (or OPCMS_SESSION_SECRET) must be configured with >= 32 random characters in production.'
+    );
+  }
+  return configured || 'ohb-opcms-dev-session-signing-key-2026';
+}
+
+const AUTH_SECRET = resolveAuthSecret();
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -31,11 +51,13 @@ export function signSessionToken(user: {
   id: number;
   username: string;
   role: UserRole;
+  tokenVersion?: number;
 }): string {
   const payload = {
     sub: user.id,
     username: user.username,
     role: user.role,
+    tv: Number(user.tokenVersion ?? 1),
     exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
   };
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -50,6 +72,7 @@ export function verifySessionToken(token: string): {
   sub: number;
   username: string;
   role: UserRole;
+  tv: number;
 } | null {
   try {
     const [encoded, sig] = token.split('.');
@@ -67,6 +90,7 @@ export function verifySessionToken(token: string): {
       sub: Number(parsed.sub),
       username: String(parsed.username),
       role: parsed.role as UserRole,
+      tv: Number(parsed.tv ?? -1),
     };
   } catch {
     return null;
@@ -273,14 +297,15 @@ export function buildAuthContext(
   const permsSet = ROLE_PERMISSIONS[user.role] ?? new Set<string>();
   const permissions = Array.from(permsSet);
 
-  // Command Room Viewer is strictly confined to /command-room with zero sidebar navigation
+  // Forced first-login password change or Command Room Viewer confinement
   const navigation =
-    user.role === 'command_room_viewer'
+    user.mustChangePassword || user.role === 'command_room_viewer'
       ? []
       : NAV_MODULE_REGISTRY.filter((item) => permsSet.has(item.requiredPermission));
 
-  const defaultLanding =
-    user.role === 'command_room_viewer'
+  const defaultLanding = user.mustChangePassword
+    ? 'change_password'
+    : user.role === 'command_room_viewer'
       ? 'command_room'
       : 'live_command_center';
 
@@ -323,7 +348,7 @@ export function attachSessionUser(
       const row = db
         .prepare('SELECT * FROM users WHERE id = ? AND is_active = 1')
         .get(claims.sub) as Record<string, unknown> | undefined;
-      if (row) {
+      if (row && Number(row.token_version ?? 1) === claims.tv) {
         req.currentUser = mapUserRow(row);
       }
     }
@@ -337,6 +362,13 @@ export function requirePermission(permission: string) {
     if (!user) {
       res.status(401).json({
         error: 'Authentication required. Please sign in to perform this action.',
+      });
+      return;
+    }
+    if (user.mustChangePassword) {
+      res.status(403).json({
+        error:
+          'Password update required. Please change your initial password before accessing protected resources.',
       });
       return;
     }

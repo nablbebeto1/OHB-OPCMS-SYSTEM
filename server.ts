@@ -269,6 +269,7 @@ app.post('/api/auth/login', (req: AuthenticatedRequest, res) => {
     id: user.id,
     username: user.username,
     role: user.role,
+    tokenVersion: Number(row.token_version ?? 1),
   });
 
   res.cookie('opcms_token', token, {
@@ -323,9 +324,14 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res) => {
     return;
   }
   const nextPw = String(newPassword);
-  if (nextPw.length < 10 || !/[A-Za-z]/.test(nextPw) || !/[0-9!@#$%^&*]/.test(nextPw)) {
+  if (
+    nextPw.length < 12 ||
+    !/[A-Za-z]/.test(nextPw) ||
+    !/[0-9!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]/.test(nextPw)
+  ) {
     res.status(400).json({
-      error: 'New password must be at least 10 characters and include letters plus numbers or symbols.',
+      error:
+        'New password must be at least 12 characters and include letters plus numbers or symbols.',
     });
     return;
   }
@@ -337,9 +343,15 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res) => {
     res.status(400).json({ error: 'Current password is incorrect.' });
     return;
   }
+  if (String(currentPassword) === nextPw) {
+    res.status(400).json({
+      error: 'New password must be different from your current password.',
+    });
+    return;
+  }
 
   db.prepare(
-    'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
+    'UPDATE users SET password_hash = ?, must_change_password = 0, token_version = token_version + 1 WHERE id = ?'
   ).run(hashPassword(nextPw), req.currentUser.id);
 
   recordAuditLog({
@@ -347,11 +359,16 @@ app.post('/api/auth/change-password', (req: AuthenticatedRequest, res) => {
     action: 'PASSWORD_CHANGED',
     entityType: 'user',
     entityId: req.currentUser.id,
-    details: `User "${req.currentUser.username}" changed password.`,
+    details: `User "${req.currentUser.username}" changed password and invalidated prior tokens.`,
     ipAddress: req.ip,
   });
 
-  res.json({ ok: true, user: { ...req.currentUser, mustChangePassword: false } });
+  res.clearCookie('opcms_token', { path: '/' });
+  res.json({
+    ok: true,
+    requiresRelogin: true,
+    message: 'Password changed successfully. Please sign in again with your new password.',
+  });
 });
 
 // ---------- Public Regional Overview (Only when explicitly enabled by System Admin) ----------
@@ -1211,10 +1228,9 @@ app.patch(
     );
 
     if (newPassword) {
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
-        hashPassword(String(newPassword)),
-        id
-      );
+      db.prepare(
+        'UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?'
+      ).run(hashPassword(String(newPassword)), id);
     }
 
     recordAuditLog({
