@@ -9,7 +9,8 @@ export interface RealtimeEvent {
     | 'record:corrected'
     | 'geo:updated'
     | 'settings:updated'
-    | 'branding:updated';
+    | 'branding:updated'
+    | 'file:uploaded';
   actor: string;
   message: string;
   timestamp: string;

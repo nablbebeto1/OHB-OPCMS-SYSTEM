@@ -14,6 +14,7 @@ import {
   mapUserRow,
   recordAuditLog,
   requirePermission,
+  ROLE_PERMISSIONS,
   signSessionToken,
   verifyPassword,
   type AuthenticatedRequest,
@@ -22,11 +23,35 @@ import {
   DEFAULT_OHB_FAVICON_SVG,
   getActiveBrandingFile,
   getBrandingConfig,
+  isValidBrandingAssetType,
   removeBrandingAsset,
+  resetAllBrandingAndAppearance,
   restoreBrandingAsset,
   saveBrandingAsset,
 } from './server/branding.ts';
+import {
+  createApplicationBackup,
+  getBackupArchivePath,
+  listBackupArchives,
+  performOperationalDataReset,
+  restoreApplicationBackup,
+} from './server/backup.ts';
 import { broadcastEvent, registerSseClient } from './server/sse.ts';
+import {
+  buildPublicPreviewInfo,
+  createPreviewLink,
+  extractSpreadsheetPreview,
+  getStoredFileById,
+  getStoredFileRawRow,
+  HttpStatusError,
+  listPreviewLinksForFile,
+  listStoredFiles,
+  resolvePublicBaseUrl,
+  resolveSafeStoragePath,
+  revokePreviewLink,
+  savePermanentFile,
+  verifyPreviewToken,
+} from './server/files.ts';
 import {
   confirmStagedImport,
   listImportBatches,
@@ -43,6 +68,7 @@ import {
   getPaginatedWoredaStatuses,
   getSystemSettings,
   invalidateAnalyticsCache,
+  persistSystemSettings,
   type AnalyticsFilter,
 } from './server/analytics.ts';
 import {
@@ -129,83 +155,34 @@ app.get('/api/branding/favicon', (_req, res) => {
   res.sendFile(asset.filePath);
 });
 
+app.get('/api/branding/asset/:assetType', (req, res) => {
+  const assetType = String(req.params.assetType || '');
+  if (!isValidBrandingAssetType(assetType)) {
+    res.status(400).json({ error: 'Invalid branding asset type.' });
+    return;
+  }
+  const asset = getActiveBrandingFile(assetType);
+  if (!asset) {
+    if (assetType === 'favicon') {
+      res.setHeader('Content-Type', 'image/svg+xml');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.send(DEFAULT_OHB_FAVICON_SVG);
+      return;
+    }
+    res.status(404).json({ error: `No custom ${assetType} is currently active.` });
+    return;
+  }
+  res.setHeader('Content-Type', asset.mimeType);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (asset.mimeType === 'image/svg+xml') {
+    res.setHeader('Content-Security-Policy', 'sandbox');
+  }
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.sendFile(asset.filePath);
+});
+
 // Admin Branding Management (System Admin ONLY)
-app.post(
-  '/api/admin/branding/logo',
-  requirePermission('manage_branding'),
-  upload.single('file'),
-  (req: AuthenticatedRequest, res) => {
-    try {
-      if (!req.file) {
-        res.status(400).json({ error: 'Please attach a system logo image file.' });
-        return;
-      }
-      const cfg = saveBrandingAsset({
-        assetType: 'logo',
-        buffer: req.file.buffer,
-        originalFilename: req.file.originalname,
-        mimeType: req.file.mimetype,
-        user: req.currentUser!,
-        ipAddress: req.ip,
-      });
-      res.status(201).json(cfg);
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
-    }
-  }
-);
-
-app.post(
-  '/api/admin/branding/favicon',
-  requirePermission('manage_branding'),
-  upload.single('file'),
-  (req: AuthenticatedRequest, res) => {
-    try {
-      if (!req.file) {
-        res.status(400).json({ error: 'Please attach a favicon file (.ico, .png, or .svg).' });
-        return;
-      }
-      const cfg = saveBrandingAsset({
-        assetType: 'favicon',
-        buffer: req.file.buffer,
-        originalFilename: req.file.originalname,
-        mimeType: req.file.mimetype,
-        user: req.currentUser!,
-        ipAddress: req.ip,
-      });
-      res.status(201).json(cfg);
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
-    }
-  }
-);
-
-app.delete(
-  '/api/admin/branding/logo',
-  requirePermission('manage_branding'),
-  (req: AuthenticatedRequest, res) => {
-    const cfg = removeBrandingAsset({
-      assetType: 'logo',
-      user: req.currentUser!,
-      ipAddress: req.ip,
-    });
-    res.json(cfg);
-  }
-);
-
-app.delete(
-  '/api/admin/branding/favicon',
-  requirePermission('manage_branding'),
-  (req: AuthenticatedRequest, res) => {
-    const cfg = removeBrandingAsset({
-      assetType: 'favicon',
-      user: req.currentUser!,
-      ipAddress: req.ip,
-    });
-    res.json(cfg);
-  }
-);
-
 app.post(
   '/api/admin/branding/restore/:id',
   requirePermission('manage_branding'),
@@ -223,6 +200,73 @@ app.post(
   }
 );
 
+app.post(
+  '/api/admin/branding/reset',
+  requirePermission('manage_branding'),
+  (req: AuthenticatedRequest, res) => {
+    const { confirmationText } = req.body ?? {};
+    if (String(confirmationText ?? '').trim() !== 'RESET BRANDING') {
+      res.status(400).json({
+        error: 'Explicit confirmation text "RESET BRANDING" is required to reset branding & appearance.',
+      });
+      return;
+    }
+    const cfg = resetAllBrandingAndAppearance({
+      user: req.currentUser!,
+      ipAddress: req.ip,
+    });
+    res.json(cfg);
+  }
+);
+
+app.post(
+  '/api/admin/branding/:assetType',
+  requirePermission('manage_branding'),
+  upload.single('file'),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      const assetType = String(req.params.assetType || '');
+      if (!isValidBrandingAssetType(assetType)) {
+        res.status(400).json({ error: 'Unsupported branding asset type.' });
+        return;
+      }
+      if (!req.file) {
+        res.status(400).json({ error: 'Please attach an image file.' });
+        return;
+      }
+      const cfg = saveBrandingAsset({
+        assetType,
+        buffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        user: req.currentUser!,
+        ipAddress: req.ip,
+      });
+      res.status(201).json(cfg);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.delete(
+  '/api/admin/branding/:assetType',
+  requirePermission('manage_branding'),
+  (req: AuthenticatedRequest, res) => {
+    const assetType = String(req.params.assetType || '');
+    if (!isValidBrandingAssetType(assetType)) {
+      res.status(400).json({ error: 'Unsupported branding asset type.' });
+      return;
+    }
+    const cfg = removeBrandingAsset({
+      assetType,
+      user: req.currentUser!,
+      ipAddress: req.ip,
+    });
+    res.json(cfg);
+  }
+);
+
 // Live Events (Authenticated Users Only)
 app.get('/api/events', requirePermission('view_command_room'), (_req, res) => {
   registerSseClient(res);
@@ -231,7 +275,12 @@ app.get('/api/events', requirePermission('view_command_room'), (_req, res) => {
 // ---------- Authentication & RBAC ----------
 app.get('/api/auth/me', (req: AuthenticatedRequest, res) => {
   const settings = getSystemSettings();
-  res.json(buildAuthContext(req.currentUser, settings.guestPublicOverviewEnabled));
+  res.json(
+    buildAuthContext(req.currentUser, settings.guestPublicOverviewEnabled, {
+      disabledModules: settings.disabledModules,
+      defaultLandingPage: settings.defaultLandingPage,
+    })
+  );
 });
 
 app.post('/api/auth/login', (req: AuthenticatedRequest, res) => {
@@ -293,19 +342,26 @@ app.post('/api/auth/login', (req: AuthenticatedRequest, res) => {
     token,
     ...buildAuthContext(
       { ...user, lastLoginAt: nowIso },
-      settings.guestPublicOverviewEnabled
+      settings.guestPublicOverviewEnabled,
+      {
+        disabledModules: settings.disabledModules,
+        defaultLandingPage: settings.defaultLandingPage,
+      }
     ),
   });
 });
 
 app.post('/api/auth/logout', (req: AuthenticatedRequest, res) => {
   if (req.currentUser) {
+    db.prepare(
+      'UPDATE users SET token_version = token_version + 1 WHERE id = ?'
+    ).run(req.currentUser.id);
     recordAuditLog({
       user: req.currentUser,
       action: 'LOGOUT',
       entityType: 'user',
       entityId: req.currentUser.id,
-      details: `User "${req.currentUser.username}" signed out.`,
+      details: `User "${req.currentUser.username}" signed out and session tokens invalidated.`,
       ipAddress: req.ip,
     });
   }
@@ -876,6 +932,253 @@ app.get('/api/templates/official', requirePermission('upload_data'), (req, res) 
   res.send(out);
 });
 
+// ---------- Permanent File Storage & 6-Day Secure Live Preview URLs ----------
+app.all('/api/files/preview/*', (req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.status(405).json({
+      error: 'Live preview links are strictly read-only. Modifications are prohibited.',
+    });
+    return;
+  }
+  next();
+});
+
+app.get('/api/files/preview/:token', (req, res) => {
+  try {
+    const baseUrl = resolvePublicBaseUrl(req);
+    const info = buildPublicPreviewInfo(req.params.token, baseUrl);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.json(info);
+  } catch (err) {
+    const status = err instanceof HttpStatusError ? err.status : 400;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/files/preview/:token/content', (req, res) => {
+  try {
+    const { fileRow, safePath } = verifyPreviewToken(req.params.token, true);
+    const download = req.query.download === '1';
+    const mimeType = String(fileRow.mime_type);
+    const origName = String(fileRow.original_filename);
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `${download ? 'attachment' : 'inline'}; filename="${origName.replace(/"/g, '')}"`
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    if (mimeType === 'image/svg+xml') {
+      res.setHeader('Content-Security-Policy', 'sandbox');
+    }
+    res.sendFile(safePath);
+  } catch (err) {
+    const status = err instanceof HttpStatusError ? err.status : 400;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/files/preview/:token/sheet', (req, res) => {
+  try {
+    const { fileRow, safePath } = verifyPreviewToken(req.params.token, false);
+    const ext = String(fileRow.extension).toLowerCase();
+    if (ext !== '.csv' && ext !== '.xlsx' && ext !== '.xls') {
+      res.status(400).json({
+        error: 'Spreadsheet table preview is only available for CSV and Excel files.',
+      });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(extractSpreadsheetPreview(safePath, ext));
+  } catch (err) {
+    const status = err instanceof HttpStatusError ? err.status : 400;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/files', requirePermission('view_files'), (req, res) => {
+  const baseUrl = resolvePublicBaseUrl(req);
+  const files = listStoredFiles({
+    module: req.query.module ? String(req.query.module) : undefined,
+    category: req.query.category ? String(req.query.category) : undefined,
+    search: req.query.search ? String(req.query.search) : undefined,
+    baseUrl,
+  });
+  res.json(files);
+});
+
+app.post(
+  '/api/files/upload',
+  requirePermission('upload_files'),
+  upload.single('file'),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'Please select a file to upload.' });
+        return;
+      }
+      const baseUrl = resolvePublicBaseUrl(req);
+      const saved = savePermanentFile({
+        buffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        user: req.currentUser!,
+        module: req.body?.module ? String(req.body.module) : 'documents',
+        category: req.body?.category ? String(req.body.category) : 'general',
+        description: req.body?.description ? String(req.body.description) : '',
+        associatedRecordType: req.body?.associatedRecordType
+          ? String(req.body.associatedRecordType)
+          : null,
+        associatedRecordId: req.body?.associatedRecordId
+          ? Number(req.body.associatedRecordId)
+          : null,
+        ipAddress: req.ip,
+        emitSse: true,
+        baseUrl,
+      });
+      res.status(201).json(saved);
+    } catch (err) {
+      const status = err instanceof HttpStatusError ? err.status : 400;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.post(
+  '/api/files/:id/preview-links',
+  requirePermission('upload_files'),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      const baseUrl = resolvePublicBaseUrl(req);
+      const link = createPreviewLink({
+        fileId: Number(req.params.id),
+        user: req.currentUser!,
+        baseUrl,
+        ipAddress: req.ip,
+      });
+      res.status(201).json(link);
+    } catch (err) {
+      const status = err instanceof HttpStatusError ? err.status : 400;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.get(
+  '/api/files/:id/preview-links',
+  requirePermission('view_files'),
+  (req, res) => {
+    const baseUrl = resolvePublicBaseUrl(req);
+    res.json(listPreviewLinksForFile(Number(req.params.id), baseUrl));
+  }
+);
+
+app.post(
+  '/api/files/preview-links/:linkId/revoke',
+  requirePermission('manage_preview_links'),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      const result = revokePreviewLink({
+        linkId: Number(req.params.linkId),
+        reason: req.body?.reason ? String(req.body.reason) : undefined,
+        user: req.currentUser!,
+        ipAddress: req.ip,
+      });
+      res.json(result);
+    } catch (err) {
+      const status = err instanceof HttpStatusError ? err.status : 400;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.get('/api/files/:id', requirePermission('view_files'), (req, res) => {
+  const rec = getStoredFileById(Number(req.params.id), resolvePublicBaseUrl(req));
+  if (!rec) {
+    res.status(404).json({ error: 'Stored file not found.' });
+    return;
+  }
+  res.json(rec);
+});
+
+app.get('/api/files/:id/download', requirePermission('view_files'), (req, res) => {
+  try {
+    const row = getStoredFileRawRow(Number(req.params.id));
+    if (!row) {
+      res.status(404).json({ error: 'Stored file not found.' });
+      return;
+    }
+    const safePath = resolveSafeStoragePath(row);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.download(safePath, String(row.original_filename));
+  } catch (err) {
+    const status = err instanceof HttpStatusError ? err.status : 400;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+app.get('/api/files/:id/view', requirePermission('view_files'), (req, res) => {
+  try {
+    const row = getStoredFileRawRow(Number(req.params.id));
+    if (!row) {
+      res.status(404).json({ error: 'Stored file not found.' });
+      return;
+    }
+    const safePath = resolveSafeStoragePath(row);
+    const mimeType = String(row.mime_type);
+    const origName = String(row.original_filename);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${origName.replace(/"/g, '')}"`
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (mimeType === 'image/svg+xml') {
+      res.setHeader('Content-Security-Policy', 'sandbox');
+    }
+    res.sendFile(safePath);
+  } catch (err) {
+    const status = err instanceof HttpStatusError ? err.status : 400;
+    res.status(status).json({ error: (err as Error).message });
+  }
+});
+
+app.delete(
+  '/api/files/:id',
+  requirePermission('delete_files'),
+  (req: AuthenticatedRequest, res) => {
+    const fileId = Number(req.params.id);
+    const existing = db
+      .prepare('SELECT id, original_filename FROM stored_files WHERE id = ? AND is_active = 1')
+      .get(fileId) as { id: number; original_filename: string } | undefined;
+    if (!existing) {
+      res.status(404).json({ error: 'Stored file not found.' });
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    db.prepare('UPDATE stored_files SET is_active = 0 WHERE id = ?').run(fileId);
+    db.prepare(
+      `UPDATE file_preview_links
+       SET is_revoked = 1, revoked_at = ?, revoked_by_user_id = ?, revoked_by_name = ?, revoke_reason = ?
+       WHERE file_id = ? AND is_revoked = 0`
+    ).run(nowIso, req.currentUser!.id, req.currentUser!.fullName, 'File deactivated', fileId);
+
+    recordAuditLog({
+      user: req.currentUser,
+      action: 'PERMANENT_FILE_DEACTIVATED',
+      entityType: 'stored_file',
+      entityId: fileId,
+      details: `Deactivated stored file #${fileId} ("${existing.original_filename}") and revoked preview links.`,
+      ipAddress: req.ip,
+    });
+
+    res.json({ ok: true });
+  }
+);
+
 // ---------- AFP & AEFI Surveillance Alerts ----------
 app.get('/api/alerts', requirePermission('view_dashboard'), (req, res) => {
   const filter = parseFilter(req);
@@ -1126,9 +1429,29 @@ app.post(
       res.status(400).json({ error: 'All required user fields must be provided.' });
       return;
     }
+    const normRole = String(role).trim() as UserRole;
+    if (!Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, normRole)) {
+      res.status(400).json({ error: 'Invalid role specified.' });
+      return;
+    }
+
+    const normUsername = String(username).trim();
+    const normEmail = String(email).trim();
+    const duplicate = db
+      .prepare(
+        'SELECT id FROM users WHERE lower(username) = lower(?) OR lower(email) = lower(?)'
+      )
+      .get(normUsername, normEmail) as { id: number } | undefined;
+    if (duplicate) {
+      res.status(409).json({
+        error: 'An account with that username or email already exists.',
+      });
+      return;
+    }
+
     const rawPw = String(password);
     if (
-      String(role) === 'command_room_viewer' &&
+      normRole === 'command_room_viewer' &&
       (rawPw.length < 10 || !/[A-Za-z]/.test(rawPw) || !/[0-9!@#$%^&*]/.test(rawPw))
     ) {
       res.status(400).json({
@@ -1141,7 +1464,7 @@ app.post(
     const forceChange =
       mustChangePassword !== undefined
         ? Boolean(mustChangePassword)
-        : String(role) === 'command_room_viewer';
+        : true;
 
     try {
       const ins = db
@@ -1150,13 +1473,13 @@ app.post(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
-          String(username).trim(),
+          normUsername,
           String(fullName).trim(),
-          String(email).trim(),
+          normEmail,
           hashPassword(rawPw),
-          String(role),
-          assignedZone ? String(assignedZone) : null,
-          assignedWoreda ? String(assignedWoreda) : null,
+          normRole,
+          assignedZone ? String(assignedZone).trim() : null,
+          assignedWoreda ? String(assignedWoreda).trim() : null,
           forceChange ? 1 : 0
         );
 
@@ -1165,7 +1488,7 @@ app.post(
         action: 'USER_CREATED',
         entityType: 'user',
         entityId: Number(ins.lastInsertRowid),
-        details: `Created user "${username}" with role "${role}".`,
+        details: `Created user "${normUsername}" with role "${normRole}".`,
         ipAddress: req.ip,
       });
 
@@ -1279,57 +1602,135 @@ app.put(
   '/api/settings',
   requirePermission('manage_settings'),
   (req: AuthenticatedRequest, res) => {
-    const body = req.body ?? {};
-    const allowedKeys = [
-      'coverageTargetPct',
-      'coverageCriticalPct',
-      'maxWastagePct',
-      'overTargetAlertPct',
-      'dailyDeviationPct',
-      'expectedWoredasOverride',
-      'guestPublicOverviewEnabled',
-      'commandRoomAutoRotate',
-      'commandRoomIntervalSec',
-      'commandRoomEnabledScreens',
-      'commandRoomDefaultScreen',
-      'commandRoomFullscreenStartup',
-      'commandRoomDataRefreshSec',
-      'commandRoomDisplayTitle',
-    ];
-    const upsert = db.prepare(
-      `INSERT INTO system_settings (key, value, updated_at)
-       VALUES (?, ?, datetime('now'))
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-    );
-
-    for (const k of allowedKeys) {
-      if (body[k] !== undefined) {
-        if (k === 'commandRoomEnabledScreens' && Array.isArray(body[k])) {
-          upsert.run(k, body[k].join(','));
-        } else {
-          upsert.run(k, body[k] === null ? '' : String(body[k]));
-        }
-      }
-    }
-
-    invalidateAnalyticsCache();
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const updated = persistSystemSettings(body);
 
     recordAuditLog({
       user: req.currentUser,
       action: 'SETTINGS_UPDATED',
       entityType: 'system_settings',
       entityId: 'global',
-      details: `Updated settings: ${JSON.stringify(body)}`,
+      details: `Updated settings (${Object.keys(body).length} fields).`,
       ipAddress: req.ip,
     });
 
     broadcastEvent({
       type: 'settings:updated',
       actor: req.currentUser!.fullName,
-      message: 'Campaign & Command Room settings updated.',
+      message: 'Application settings & appearance configuration updated.',
+    });
+    broadcastEvent({
+      type: 'branding:updated',
+      actor: req.currentUser!.fullName,
+      message: 'Branding theme & identity updated.',
     });
 
-    res.json(getSystemSettings());
+    res.json(updated);
+  }
+);
+
+// ---------- Backup, Restoration & Safe Operational Data Reset ----------
+app.get(
+  '/api/admin/backups',
+  requirePermission('manage_settings'),
+  async (_req, res) => {
+    try {
+      res.json(await listBackupArchives());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/backups',
+  requirePermission('manage_settings'),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const backup = await createApplicationBackup({
+        user: req.currentUser!,
+        ipAddress: req.ip,
+      });
+      res.status(201).json(backup);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/backups/:filename/download',
+  requirePermission('manage_settings'),
+  (req, res) => {
+    try {
+      const filePath = getBackupArchivePath(String(req.params.filename || ''));
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.download(filePath, path.basename(filePath));
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/backups/restore',
+  requirePermission('manage_settings'),
+  upload.single('file'),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const restoreScope =
+        req.body?.restoreScope === 'branding_and_settings'
+          ? 'branding_and_settings'
+          : 'full';
+      let zipBuffer: Buffer | null = null;
+      const requestedFilename = req.body?.serverFilename || req.body?.backupFilename;
+      if (req.file) {
+        zipBuffer = req.file.buffer;
+      } else if (requestedFilename) {
+        const archivePath = getBackupArchivePath(String(requestedFilename));
+        zipBuffer = fs.readFileSync(archivePath);
+      }
+
+      if (!zipBuffer) {
+        res.status(400).json({
+          error: 'Please upload a backup .zip file or select an existing server backup snapshot.',
+        });
+        return;
+      }
+
+      const result = await restoreApplicationBackup({
+        zipBuffer,
+        restoreScope,
+        user: req.currentUser!,
+        ipAddress: req.ip,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/operational-reset',
+  requirePermission('manage_settings'),
+  (req: AuthenticatedRequest, res) => {
+    try {
+      const { confirmationText, scope, clearStoredVaultFiles } = req.body ?? {};
+      const result = performOperationalDataReset({
+        confirmationText: String(confirmationText ?? ''),
+        scope:
+          scope === 'all_operational_data'
+            ? 'all_operational_data'
+            : 'campaign_reports_only',
+        clearStoredVaultFiles: Boolean(clearStoredVaultFiles),
+        user: req.currentUser!,
+        ipAddress: req.ip,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   }
 );
 

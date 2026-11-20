@@ -3,21 +3,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BRANDING_DIR, db } from './db.ts';
 import { recordAuditLog } from './auth.ts';
+import { getSystemSettings, persistSystemSettings } from './analytics.ts';
 import { broadcastEvent } from './sse.ts';
 import type {
   BrandingAssetMeta,
   BrandingAssetType,
   BrandingConfig,
+  BrandingSlotStatus,
   UserAccount,
 } from '../src/types/opcms.ts';
 
+export const ALL_BRANDING_ASSET_TYPES: BrandingAssetType[] = [
+  'logo',
+  'app_logo',
+  'command_center_logo',
+  'login_logo',
+  'header_logo',
+  'footer_logo',
+  'favicon',
+  'login_background',
+  'visual_asset',
+];
+
 const MAX_LOGO_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_BACKGROUND_BYTES = 10 * 1024 * 1024; // 10 MB for background banners
 const MAX_FAVICON_BYTES = 2 * 1024 * 1024; // 2 MB
 
-const ALLOWED_LOGO_EXTS = new Set(['.png', '.jpg', '.jpeg', '.svg', '.webp']);
+const ALLOWED_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.svg', '.webp']);
 const ALLOWED_FAVICON_EXTS = new Set(['.ico', '.png', '.svg']);
 
-const ALLOWED_LOGO_MIMES = new Set([
+const ALLOWED_IMAGE_MIMES = new Set([
   'image/png',
   'image/jpeg',
   'image/jpg',
@@ -39,6 +54,10 @@ export const DEFAULT_OHB_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" 
   <circle cx="20" cy="20" r="3" fill="#D29441"/>
 </svg>`;
 
+export function isValidBrandingAssetType(value: string): value is BrandingAssetType {
+  return ALL_BRANDING_ASSET_TYPES.includes(value as BrandingAssetType);
+}
+
 function mapAssetRow(row: Record<string, unknown>): BrandingAssetMeta {
   return {
     id: Number(row.id),
@@ -47,6 +66,7 @@ function mapAssetRow(row: Record<string, unknown>): BrandingAssetMeta {
     storedFilename: String(row.stored_filename),
     mimeType: String(row.mime_type),
     fileSizeBytes: Number(row.file_size_bytes),
+    sha256Checksum: row.sha256_checksum ? String(row.sha256_checksum) : null,
     width: row.width !== null && row.width !== undefined ? Number(row.width) : null,
     height: row.height !== null && row.height !== undefined ? Number(row.height) : null,
     isActive: Number(row.is_active) === 1,
@@ -77,7 +97,6 @@ function parseJpegDimensions(buf: Buffer): { width: number; height: number } | n
       continue;
     }
     const marker = buf[offset + 1];
-    // SOF markers that contain width/height
     if (
       marker >= 0xc0 &&
       marker <= 0xcf &&
@@ -191,17 +210,7 @@ function validateAssetBuffer(params: {
     throw new Error('Uploaded image file is empty.');
   }
 
-  if (assetType === 'logo') {
-    if (buffer.length > MAX_LOGO_BYTES) {
-      throw new Error('System logo exceeds maximum allowed size of 5 MB.');
-    }
-    if (!ALLOWED_LOGO_EXTS.has(ext)) {
-      throw new Error('Unsupported logo file format. Allowed: PNG, JPG, JPEG, SVG, WebP.');
-    }
-    if (normalizedInputMime && !ALLOWED_LOGO_MIMES.has(normalizedInputMime)) {
-      throw new Error(`Unsupported logo MIME type: ${normalizedInputMime}.`);
-    }
-  } else {
+  if (assetType === 'favicon') {
     if (buffer.length > MAX_FAVICON_BYTES) {
       throw new Error('Favicon exceeds maximum allowed size of 2 MB.');
     }
@@ -210,6 +219,22 @@ function validateAssetBuffer(params: {
     }
     if (normalizedInputMime && !ALLOWED_FAVICON_MIMES.has(normalizedInputMime)) {
       throw new Error(`Unsupported favicon MIME type: ${normalizedInputMime}.`);
+    }
+  } else {
+    const maxBytes =
+      assetType === 'login_background' || assetType === 'visual_asset'
+        ? MAX_BACKGROUND_BYTES
+        : MAX_LOGO_BYTES;
+    if (buffer.length > maxBytes) {
+      throw new Error(
+        `Image exceeds maximum allowed size of ${Math.round(maxBytes / (1024 * 1024))} MB.`
+      );
+    }
+    if (!ALLOWED_IMAGE_EXTS.has(ext)) {
+      throw new Error('Unsupported image format. Allowed: PNG, JPG, JPEG, SVG, WebP.');
+    }
+    if (normalizedInputMime && !ALLOWED_IMAGE_MIMES.has(normalizedInputMime)) {
+      throw new Error(`Unsupported image MIME type: ${normalizedInputMime}.`);
     }
   }
 
@@ -241,39 +266,66 @@ function validateAssetBuffer(params: {
   throw new Error('Unsupported branding asset file type.');
 }
 
+function assetEndpointUrl(assetType: BrandingAssetType, id: number): string {
+  if (assetType === 'logo') return `/api/branding/logo?v=${id}`;
+  if (assetType === 'favicon') return `/api/branding/favicon?v=${id}`;
+  return `/api/branding/asset/${assetType}?v=${id}`;
+}
+
 export function getBrandingConfig(includeHistory = false): BrandingConfig {
-  const activeLogoRow = db
-    .prepare(
-      `SELECT * FROM branding_assets WHERE asset_type = 'logo' AND is_active = 1 ORDER BY id DESC LIMIT 1`
-    )
-    .get() as Record<string, unknown> | undefined;
+  const activeRows = db
+    .prepare(`SELECT * FROM branding_assets WHERE is_active = 1 ORDER BY id DESC`)
+    .all() as Array<Record<string, unknown>>;
 
-  const activeFaviconRow = db
-    .prepare(
-      `SELECT * FROM branding_assets WHERE asset_type = 'favicon' AND is_active = 1 ORDER BY id DESC LIMIT 1`
-    )
-    .get() as Record<string, unknown> | undefined;
+  const byType = new Map<BrandingAssetType, BrandingAssetMeta>();
+  for (const row of activeRows) {
+    const mapped = mapAssetRow(row);
+    if (!byType.has(mapped.assetType)) {
+      byType.set(mapped.assetType, mapped);
+    }
+  }
 
-  const logoMeta = activeLogoRow ? mapAssetRow(activeLogoRow) : null;
-  const faviconMeta = activeFaviconRow ? mapAssetRow(activeFaviconRow) : null;
+  const assets: Partial<Record<BrandingAssetType, BrandingSlotStatus>> = {};
+  for (const t of ALL_BRANDING_ASSET_TYPES) {
+    const meta = byType.get(t) ?? null;
+    assets[t] = {
+      url: meta ? assetEndpointUrl(t, meta.id) : null,
+      hasCustom: Boolean(meta),
+      meta,
+    };
+  }
+
+  const logoMeta = byType.get('logo') ?? null;
+  const faviconMeta = byType.get('favicon') ?? null;
 
   const latestRow = db
     .prepare(`SELECT uploaded_at FROM branding_assets ORDER BY id DESC LIMIT 1`)
     .get() as { uploaded_at?: string } | undefined;
 
+  const latestSettingsRow = db
+    .prepare(
+      `SELECT updated_at FROM system_settings
+       WHERE key IN ('appName', 'appShortName', 'organizationName', 'appTagline', 'footerText', 'primaryColor', 'secondaryColor', 'accentColor', 'surfaceColor', 'displayFont', 'bodyFont', 'fontScale', 'loginTheme', 'defaultLanguage', 'showFooterBranding')
+       ORDER BY updated_at DESC LIMIT 1`
+    )
+    .get() as { updated_at?: string } | undefined;
+
   const updatedAt =
     logoMeta?.uploadedAt ??
     faviconMeta?.uploadedAt ??
     latestRow?.uploaded_at ??
+    latestSettingsRow?.updated_at ??
     new Date(0).toISOString();
 
   const history = includeHistory
     ? (
         db
-          .prepare(`SELECT * FROM branding_assets ORDER BY id DESC LIMIT 20`)
+          .prepare(`SELECT * FROM branding_assets ORDER BY id DESC LIMIT 50`)
           .all() as Array<Record<string, unknown>>
       ).map(mapAssetRow)
     : undefined;
+
+  const settings = getSystemSettings();
 
   return {
     logoUrl: logoMeta ? `/api/branding/logo?v=${logoMeta.id}` : null,
@@ -282,6 +334,26 @@ export function getBrandingConfig(includeHistory = false): BrandingConfig {
     hasCustomFavicon: Boolean(faviconMeta),
     logoMeta,
     faviconMeta,
+    assets,
+    identity: {
+      appName: settings.appName,
+      appShortName: settings.appShortName,
+      organizationName: settings.organizationName,
+      appTagline: settings.appTagline,
+      footerText: settings.footerText,
+      showFooterBranding: settings.showFooterBranding,
+      defaultLanguage: settings.defaultLanguage,
+    },
+    theme: {
+      primaryColor: settings.primaryColor,
+      secondaryColor: settings.secondaryColor,
+      accentColor: settings.accentColor,
+      surfaceColor: settings.surfaceColor,
+      displayFont: settings.displayFont,
+      bodyFont: settings.bodyFont,
+      fontScale: settings.fontScale,
+      loginTheme: settings.loginTheme,
+    },
     history,
     updatedAt,
   };
@@ -334,12 +406,14 @@ export function saveBrandingAsset(params: {
     mimeType,
   });
 
+  const sha256Checksum = crypto.createHash('sha256').update(buffer).digest('hex');
   const uniqueFilename = `${assetType}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}${ext}`;
   const targetPath = path.resolve(BRANDING_DIR, path.basename(uniqueFilename));
   if (!targetPath.startsWith(BRANDING_DIR + path.sep)) {
     throw new Error('Invalid branding storage path.');
   }
 
+  fs.mkdirSync(BRANDING_DIR, { recursive: true });
   fs.writeFileSync(targetPath, buffer);
   const nowIso = new Date().toISOString();
 
@@ -353,9 +427,9 @@ export function saveBrandingAsset(params: {
       .prepare(
         `INSERT INTO branding_assets (
           asset_type, original_filename, stored_filename, stored_path,
-          mime_type, file_size_bytes, width, height, is_active,
+          mime_type, file_size_bytes, sha256_checksum, width, height, is_active,
           uploaded_by_user_id, uploaded_by_name, uploaded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
       )
       .run(
         assetType,
@@ -364,6 +438,7 @@ export function saveBrandingAsset(params: {
         targetPath,
         normalizedMime,
         buffer.length,
+        sha256Checksum,
         width,
         height,
         user.id,
@@ -375,10 +450,10 @@ export function saveBrandingAsset(params: {
 
     recordAuditLog({
       user,
-      action: assetType === 'logo' ? 'BRANDING_LOGO_UPDATED' : 'BRANDING_FAVICON_UPDATED',
+      action: `BRANDING_${assetType.toUpperCase()}_UPDATED`,
       entityType: 'branding_asset',
       entityId: Number(ins.lastInsertRowid),
-      details: `Uploaded ${assetType} "${path.basename(originalFilename)}" (${normalizedMime}, ${width ?? '?'}x${height ?? '?'}).`,
+      details: `Uploaded ${assetType} "${path.basename(originalFilename)}" (${normalizedMime}, ${width ?? '?'}x${height ?? '?'}, sha256=${sha256Checksum.slice(0, 12)}). Previous assets retained for recovery.`,
       ipAddress,
     });
   } catch (err) {
@@ -392,7 +467,7 @@ export function saveBrandingAsset(params: {
   broadcastEvent({
     type: 'branding:updated',
     actor: user.fullName,
-    message: `System ${assetType} updated.`,
+    message: `Branding asset (${assetType}) updated.`,
   });
 
   return getBrandingConfig(true);
@@ -410,17 +485,17 @@ export function removeBrandingAsset(params: {
 
   recordAuditLog({
     user,
-    action: assetType === 'logo' ? 'BRANDING_LOGO_REMOVED' : 'BRANDING_FAVICON_REMOVED',
+    action: `BRANDING_${assetType.toUpperCase()}_REMOVED`,
     entityType: 'branding_asset',
     entityId: assetType,
-    details: `Removed active ${assetType} (reverted to default OHB identity; archived file retained on server).`,
+    details: `Deactivated active ${assetType} (archived file retained in permanent storage for recovery).`,
     ipAddress,
   });
 
   broadcastEvent({
     type: 'branding:updated',
     actor: user.fullName,
-    message: `System ${assetType} removed.`,
+    message: `Branding asset (${assetType}) deactivated.`,
   });
 
   return getBrandingConfig(true);
@@ -469,6 +544,51 @@ export function restoreBrandingAsset(params: {
     type: 'branding:updated',
     actor: params.user.fullName,
     message: `Restored previous ${assetType}.`,
+  });
+
+  return getBrandingConfig(true);
+}
+
+export function resetAllBrandingAndAppearance(params: {
+  user: UserAccount;
+  ipAddress?: string;
+}): BrandingConfig {
+  db.prepare(`UPDATE branding_assets SET is_active = 0 WHERE is_active = 1`).run();
+  persistSystemSettings({
+    appName: 'Oromia Polio Campaign Management System (OHB-OPCMS)',
+    appShortName: 'OHB-OPCMS',
+    organizationName: 'Oromia Health Bureau',
+    appTagline: 'Central Command Center – nOPV2 and bOPV2 Supplementary Immunization Activities',
+    footerText: 'Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System',
+    primaryColor: '#485EA9',
+    secondaryColor: '#3A99CF',
+    accentColor: '#D29441',
+    surfaceColor: '#F8FAFC',
+    displayFont: 'Plus Jakarta Sans',
+    bodyFont: 'DM Sans',
+    fontScale: 'standard',
+    loginTheme: 'clean_light',
+    showFooterBranding: true,
+  });
+
+  recordAuditLog({
+    user: params.user,
+    action: 'BRANDING_EXPLICIT_RESET',
+    entityType: 'branding_asset',
+    entityId: 'all',
+    details: 'Administrator explicitly reset active branding & appearance settings to OHB institutional defaults (retained files remain recoverable).',
+    ipAddress: params.ipAddress,
+  });
+
+  broadcastEvent({
+    type: 'branding:updated',
+    actor: params.user.fullName,
+    message: 'Branding & appearance reset to institutional defaults.',
+  });
+  broadcastEvent({
+    type: 'settings:updated',
+    actor: params.user.fullName,
+    message: 'Appearance settings reset to defaults.',
   });
 
   return getBrandingConfig(true);

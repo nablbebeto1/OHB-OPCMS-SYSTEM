@@ -91,6 +91,7 @@ class ImportBatch(Base):
     rolled_back_at = Column(DateTime, nullable=True)
     rolled_back_by_name = Column(String(200), nullable=True)
     notes = Column(Text, nullable=True)
+    stored_file_id = Column(Integer, ForeignKey("stored_files.id"), nullable=True)
 
 
 class CampaignDailyReport(Base):
@@ -242,16 +243,66 @@ class BrandingAsset(Base):
     __tablename__ = "branding_assets"
 
     id = Column(Integer, primary_key=True, index=True)
-    asset_type = Column(String(20), nullable=False, index=True)  # 'logo' or 'favicon'
+    asset_type = Column(String(40), nullable=False, index=True)
     original_filename = Column(String(300), nullable=False)
     stored_filename = Column(String(300), unique=True, nullable=False)
     stored_path = Column(String(500), nullable=False)
     mime_type = Column(String(100), nullable=False)
     file_size_bytes = Column(Integer, nullable=False)
+    sha256_checksum = Column(String(64), nullable=True)
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     uploaded_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     uploaded_by_name = Column(String(200), nullable=False)
     uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class StoredFile(Base):
+    __tablename__ = "stored_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_uuid = Column(String(64), unique=True, nullable=False, index=True)
+    original_filename = Column(String(300), nullable=False)
+    stored_filename = Column(String(300), unique=True, nullable=False)
+    extension = Column(String(20), nullable=False)
+    mime_type = Column(String(120), nullable=False)
+    file_size_bytes = Column(Integer, nullable=False)
+    sha256_checksum = Column(String(64), nullable=True)
+    module = Column(String(60), nullable=False, default="documents", index=True)
+    category = Column(String(80), nullable=False, default="general", index=True)
+    associated_record_type = Column(String(60), nullable=True)
+    associated_record_id = Column(Integer, nullable=True)
+    description = Column(Text, default="", nullable=False)
+    relative_path = Column(String(500), nullable=False)
+    storage_path = Column(String(600), nullable=False)
+    uploaded_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    uploaded_by_name = Column(String(200), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+
+    preview_links = relationship("FilePreviewLink", back_populates="stored_file")
+
+
+class FilePreviewLink(Base):
+    __tablename__ = "file_preview_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("stored_files.id"), nullable=False, index=True)
+    token_id = Column(String(64), unique=True, nullable=False, index=True)
+    signature_hmac = Column(String(128), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    is_revoked = Column(Boolean, default=False, nullable=False, index=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    revoked_by_name = Column(String(200), nullable=True)
+    revoke_reason = Column(String(300), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by_name = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_accessed_at = Column(DateTime, nullable=True)
+    access_count = Column(Integer, default=0, nullable=False)
+
+    stored_file = relationship("StoredFile", back_populates="preview_links")
+
 

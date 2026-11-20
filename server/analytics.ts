@@ -43,13 +43,93 @@ export function getAnalyticsCacheVersion(): number {
   return analyticsCacheVersion;
 }
 
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+const CORE_ADMIN_MODULES = new Set(['system_settings', 'branding_appearance', 'user_management']);
+
+export const DEFAULT_SYSTEM_SETTINGS_MAP: Record<string, string> = {
+  // Surveillance & Thresholds
+  coverageTargetPct: '95',
+  coverageCriticalPct: '80',
+  maxWastagePct: '15',
+  overTargetAlertPct: '105',
+  dailyDeviationPct: '35',
+  expectedWoredasOverride: '',
+  googleDriveSyncStatus: 'manual_upload_active',
+  guestPublicOverviewEnabled: 'false',
+
+  // General Application Settings
+  appName: 'Oromia Polio Campaign Management System (OHB-OPCMS)',
+  appShortName: 'OHB-OPCMS',
+  organizationName: 'Oromia Health Bureau',
+  appTagline: 'Central Command Center – nOPV2 and bOPV2 Supplementary Immunization Activities',
+  footerText: 'Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System',
+  timezone: 'Africa/Addis_Ababa',
+  dateFormat: 'YYYY-MM-DD',
+  supportContact: 'phem@oromiahealth.gov.et',
+
+  // Branding & Appearance
+  primaryColor: '#485EA9',
+  secondaryColor: '#3A99CF',
+  accentColor: '#D29441',
+  surfaceColor: '#F8FAFC',
+  displayFont: 'Plus Jakarta Sans',
+  bodyFont: 'DM Sans',
+  fontScale: 'standard',
+  loginTheme: 'clean_light',
+
+  // Language Preferences
+  defaultLanguage: 'en',
+  allowUserLanguageSwitch: 'true',
+
+  // Dashboard Configuration
+  defaultCampaignId: '1',
+  dashboardAutoRefreshSec: '30',
+  showDataQualityBanner: 'true',
+  defaultLandingPage: 'live_command_center',
+
+  // Navigation & Module Settings
+  disabledModules: '',
+  sidebarCollapsedDefault: 'false',
+  showFooterBranding: 'true',
+
+  // User Interface Preferences
+  uiDensity: 'comfortable',
+  tableRowsPerPage: '25',
+  showAnimations: 'true',
+  highContrastMode: 'false',
+
+  // Command Center & Command Room
+  commandRoomAutoRotate: 'true',
+  commandRoomIntervalSec: '15',
+  commandRoomEnabledScreens: '1,2,3,4,5',
+  commandRoomDefaultScreen: '1',
+  commandRoomFullscreenStartup: 'false',
+  commandRoomDataRefreshSec: '30',
+  commandRoomDisplayTitle: 'Oromia Health Bureau – Polio Campaign Command Room',
+  liveCommandAutoRefresh: 'true',
+  liveCommandShowTicker: 'true',
+
+  // Upload & File Management
+  maxUploadSizeMb: '25',
+  previewLinkTtlHours: '144',
+  requireImportConfirmation: 'true',
+  retainArchivedBrandingAssets: 'true',
+};
+
+function safeHex(val: string | undefined, fallback: string): string {
+  const trimmed = (val ?? '').trim();
+  return HEX_COLOR_RE.test(trimmed) ? trimmed.toUpperCase() : fallback;
+}
+
 export function getSystemSettings(): SystemSettings {
   const rows = db
     .prepare('SELECT key, value FROM system_settings')
     .all() as Array<{ key: string; value: string }>;
   const map = new Map(rows.map((r) => [r.key, r.value]));
-  const overrideRaw = map.get('expectedWoredasOverride') ?? '';
-  const enabledRaw = map.get('commandRoomEnabledScreens') ?? '1,2,3,4,5';
+  const get = (k: string) => map.get(k) ?? DEFAULT_SYSTEM_SETTINGS_MAP[k] ?? '';
+
+  const overrideRaw = get('expectedWoredasOverride').trim();
+  const enabledRaw = get('commandRoomEnabledScreens') || '1,2,3,4,5';
   const enabledScreens = enabledRaw
     .split(',')
     .map((s) => Number(s.trim()))
@@ -57,39 +137,165 @@ export function getSystemSettings(): SystemSettings {
 
   const intervalSec = Math.min(
     120,
-    Math.max(5, Number(map.get('commandRoomIntervalSec') ?? 15) || 15)
+    Math.max(5, Number(get('commandRoomIntervalSec') || 15) || 15)
   );
   const refreshSec = Math.min(
     300,
-    Math.max(10, Number(map.get('commandRoomDataRefreshSec') ?? 30) || 30)
+    Math.max(10, Number(get('commandRoomDataRefreshSec') || 30) || 30)
   );
-  const defaultScreenRaw = Number(map.get('commandRoomDefaultScreen') ?? 1);
-  const defaultScreen =
-    enabledScreens.includes(defaultScreenRaw)
-      ? defaultScreenRaw
-      : enabledScreens[0] ?? 1;
+  const defaultScreenRaw = Number(get('commandRoomDefaultScreen') || 1);
+  const defaultScreen = enabledScreens.includes(defaultScreenRaw)
+    ? defaultScreenRaw
+    : enabledScreens[0] ?? 1;
+
+  const dfRaw = get('dateFormat');
+  const dateFormat =
+    dfRaw === 'DD/MM/YYYY' || dfRaw === 'MMM DD, YYYY' ? dfRaw : 'YYYY-MM-DD';
+
+  const displayFontRaw = get('displayFont');
+  const displayFont =
+    displayFontRaw === 'DM Sans' ||
+    displayFontRaw === 'Inter' ||
+    displayFontRaw === 'System Sans'
+      ? displayFontRaw
+      : 'Plus Jakarta Sans';
+
+  const bodyFontRaw = get('bodyFont');
+  const bodyFont =
+    bodyFontRaw === 'Plus Jakarta Sans' ||
+    bodyFontRaw === 'Inter' ||
+    bodyFontRaw === 'System Sans'
+      ? bodyFontRaw
+      : 'DM Sans';
+
+  const fontScaleRaw = get('fontScale');
+  const fontScale =
+    fontScaleRaw === 'compact' || fontScaleRaw === 'comfortable'
+      ? fontScaleRaw
+      : 'standard';
+
+  const loginTheme =
+    get('loginTheme') === 'institutional_gradient'
+      ? 'institutional_gradient'
+      : 'clean_light';
+
+  const langRaw = get('defaultLanguage');
+  const defaultLanguage = langRaw === 'om' || langRaw === 'am' ? langRaw : 'en';
+
+  const landingRaw = get('defaultLandingPage');
+  const defaultLandingPage =
+    landingRaw === 'command_center' || landingRaw === 'campaign_overview'
+      ? landingRaw
+      : 'live_command_center';
+
+  const disabledModules = get('disabledModules')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => Boolean(s) && !CORE_ADMIN_MODULES.has(s));
+
+  const defaultCampRaw = get('defaultCampaignId').trim();
 
   return {
-    coverageTargetPct: Number(map.get('coverageTargetPct') ?? 95),
-    coverageCriticalPct: Number(map.get('coverageCriticalPct') ?? 80),
-    maxWastagePct: Number(map.get('maxWastagePct') ?? 15),
-    overTargetAlertPct: Number(map.get('overTargetAlertPct') ?? 105),
-    dailyDeviationPct: Number(map.get('dailyDeviationPct') ?? 35),
+    coverageTargetPct: Number(get('coverageTargetPct') || 95),
+    coverageCriticalPct: Number(get('coverageCriticalPct') || 80),
+    maxWastagePct: Number(get('maxWastagePct') || 15),
+    overTargetAlertPct: Number(get('overTargetAlertPct') || 105),
+    dailyDeviationPct: Number(get('dailyDeviationPct') || 35),
     expectedWoredasOverride: overrideRaw ? Number(overrideRaw) : null,
     googleDriveSyncStatus: 'manual_upload_active',
-    guestPublicOverviewEnabled: map.get('guestPublicOverviewEnabled') === 'true',
-    commandRoomAutoRotate: (map.get('commandRoomAutoRotate') ?? 'true') !== 'false',
+    guestPublicOverviewEnabled: get('guestPublicOverviewEnabled') === 'true',
+
+    appName: get('appName') || DEFAULT_SYSTEM_SETTINGS_MAP.appName,
+    appShortName: get('appShortName') || DEFAULT_SYSTEM_SETTINGS_MAP.appShortName,
+    organizationName: get('organizationName') || DEFAULT_SYSTEM_SETTINGS_MAP.organizationName,
+    appTagline: get('appTagline') || DEFAULT_SYSTEM_SETTINGS_MAP.appTagline,
+    footerText: get('footerText') || DEFAULT_SYSTEM_SETTINGS_MAP.footerText,
+    timezone: get('timezone') || 'Africa/Addis_Ababa',
+    dateFormat,
+    supportContact: get('supportContact'),
+
+    primaryColor: safeHex(get('primaryColor'), '#485EA9'),
+    secondaryColor: safeHex(get('secondaryColor'), '#3A99CF'),
+    accentColor: safeHex(get('accentColor'), '#D29441'),
+    surfaceColor: safeHex(get('surfaceColor'), '#F8FAFC'),
+    displayFont,
+    bodyFont,
+    fontScale,
+    loginTheme,
+
+    defaultLanguage,
+    allowUserLanguageSwitch: get('allowUserLanguageSwitch') !== 'false',
+
+    defaultCampaignId: defaultCampRaw ? Number(defaultCampRaw) || 1 : null,
+    dashboardAutoRefreshSec: Math.min(
+      300,
+      Math.max(10, Number(get('dashboardAutoRefreshSec') || 30) || 30)
+    ),
+    showDataQualityBanner: get('showDataQualityBanner') !== 'false',
+    defaultLandingPage,
+
+    disabledModules,
+    sidebarCollapsedDefault: get('sidebarCollapsedDefault') === 'true',
+    showFooterBranding: get('showFooterBranding') !== 'false',
+
+    uiDensity: get('uiDensity') === 'compact' ? 'compact' : 'comfortable',
+    tableRowsPerPage: Math.min(
+      200,
+      Math.max(10, Number(get('tableRowsPerPage') || 25) || 25)
+    ),
+    showAnimations: get('showAnimations') !== 'false',
+    highContrastMode: get('highContrastMode') === 'true',
+
+    commandRoomAutoRotate: get('commandRoomAutoRotate') !== 'false',
     commandRoomIntervalSec: intervalSec,
     commandRoomEnabledScreens:
       enabledScreens.length > 0 ? enabledScreens : [1, 2, 3, 4, 5],
     commandRoomDefaultScreen: defaultScreen,
-    commandRoomFullscreenStartup:
-      (map.get('commandRoomFullscreenStartup') ?? 'false') === 'true',
+    commandRoomFullscreenStartup: get('commandRoomFullscreenStartup') === 'true',
     commandRoomDataRefreshSec: refreshSec,
     commandRoomDisplayTitle:
-      map.get('commandRoomDisplayTitle') ||
-      'Oromia Health Bureau – Polio Campaign Command Room',
+      get('commandRoomDisplayTitle') ||
+      DEFAULT_SYSTEM_SETTINGS_MAP.commandRoomDisplayTitle,
+    liveCommandAutoRefresh: get('liveCommandAutoRefresh') !== 'false',
+    liveCommandShowTicker: get('liveCommandShowTicker') !== 'false',
+
+    maxUploadSizeMb: Math.min(100, Math.max(1, Number(get('maxUploadSizeMb') || 25) || 25)),
+    previewLinkTtlHours: Math.min(
+      720,
+      Math.max(1, Number(get('previewLinkTtlHours') || 144) || 144)
+    ),
+    requireImportConfirmation: get('requireImportConfirmation') !== 'false',
+    retainArchivedBrandingAssets: get('retainArchivedBrandingAssets') !== 'false',
   };
+}
+
+export const ALLOWED_SETTING_KEYS = Object.keys(DEFAULT_SYSTEM_SETTINGS_MAP).filter(
+  (k) => k !== 'googleDriveSyncStatus'
+);
+
+export function persistSystemSettings(body: Record<string, unknown>): SystemSettings {
+  const upsert = db.prepare(
+    `INSERT INTO system_settings (key, value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  );
+
+  for (const k of ALLOWED_SETTING_KEYS) {
+    if (body[k] !== undefined) {
+      if (k === 'commandRoomEnabledScreens' && Array.isArray(body[k])) {
+        upsert.run(k, (body[k] as unknown[]).join(','));
+      } else if (k === 'disabledModules' && Array.isArray(body[k])) {
+        const filtered = (body[k] as unknown[])
+          .map((x) => String(x).trim())
+          .filter((x) => Boolean(x) && !CORE_ADMIN_MODULES.has(x));
+        upsert.run(k, filtered.join(','));
+      } else {
+        upsert.run(k, body[k] === null ? '' : String(body[k]));
+      }
+    }
+  }
+  invalidateAnalyticsCache();
+  return getSystemSettings();
 }
 
 export function mapReportRow(row: Record<string, unknown>): CampaignDailyReport {

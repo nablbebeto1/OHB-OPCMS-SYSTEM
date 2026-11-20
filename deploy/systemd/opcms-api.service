@@ -9,10 +9,11 @@ Group=opcms
 WorkingDirectory=/opt/ohb-opcms/backend
 EnvironmentFile=/opt/ohb-opcms/.env
 ExecStart=/opt/ohb-opcms/backend/.venv/bin/gunicorn app.main:app \
-  --workers 4 \
+  --workers 1 \
   --worker-class uvicorn.workers.UvicornWorker \
   --bind 127.0.0.1:4949 \
   --timeout 120
+ReadWritePaths=/var/lib/ohb-opcms/uploads
 Restart=always
 RestartSec=5
 

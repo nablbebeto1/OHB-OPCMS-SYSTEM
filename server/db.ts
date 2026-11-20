@@ -2,23 +2,42 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'imports');
-const BRANDING_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'branding');
+function resolvePermanentUploadRoot(): string {
+  const candidates = [
+    process.env.UPLOAD_DIR?.trim(),
+    '/var/lib/ohb-opcms/uploads',
+    path.resolve(process.cwd(), 'uploads'),
+  ].filter(Boolean) as string[];
 
+  for (const candidate of candidates) {
+    try {
+      const resolved = path.resolve(candidate);
+      for (const sub of ['imports', 'branding', 'documents', 'geo', 'staging', 'backups']) {
+        fs.mkdirSync(path.join(resolved, sub), { recursive: true });
+      }
+      fs.accessSync(resolved, fs.constants.R_OK | fs.constants.W_OK);
+      return resolved;
+    } catch {
+      // try next fallback if permission is restricted
+    }
+  }
+  const fallback = path.resolve(process.cwd(), 'uploads');
+  fs.mkdirSync(fallback, { recursive: true });
+  return fallback;
+}
+
+const DATA_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-if (!fs.existsSync(BRANDING_UPLOAD_DIR)) {
-  fs.mkdirSync(BRANDING_UPLOAD_DIR, { recursive: true });
-}
 
+export const UPLOAD_ROOT = resolvePermanentUploadRoot();
+export const LEGACY_UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
 export const DB_PATH = path.join(DATA_DIR, 'opcms.db');
-export const UPLOADS_DIR = UPLOAD_DIR;
-export const BRANDING_DIR = BRANDING_UPLOAD_DIR;
+export const UPLOADS_DIR = path.join(UPLOAD_ROOT, 'imports');
+export const BRANDING_DIR = path.join(UPLOAD_ROOT, 'branding');
+export const DOCUMENTS_DIR = path.join(UPLOAD_ROOT, 'documents');
+export const BACKUPS_DIR = path.join(UPLOAD_ROOT, 'backups');
 
 export const db = new DatabaseSync(DB_PATH);
 
@@ -33,7 +52,7 @@ export function initDatabase(): void {
       full_name TEXT NOT NULL,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('system_admin', 'central_command', 'zone_officer', 'woreda_officer', 'viewer', 'command_room_viewer')),
+      role TEXT NOT NULL CHECK(role IN ('system_admin', 'command_center', 'central_command', 'zone_officer', 'woreda_officer', 'viewer', 'command_room_viewer')),
       assigned_zone TEXT,
       assigned_woreda TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
@@ -226,12 +245,13 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS branding_assets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      asset_type TEXT NOT NULL CHECK(asset_type IN ('logo', 'favicon')),
+      asset_type TEXT NOT NULL CHECK(asset_type IN ('logo', 'app_logo', 'command_center_logo', 'login_logo', 'header_logo', 'footer_logo', 'favicon', 'login_background', 'visual_asset')),
       original_filename TEXT NOT NULL,
       stored_filename TEXT NOT NULL UNIQUE,
       stored_path TEXT NOT NULL,
       mime_type TEXT NOT NULL,
       file_size_bytes INTEGER NOT NULL,
+      sha256_checksum TEXT,
       width INTEGER,
       height INTEGER,
       is_active INTEGER NOT NULL DEFAULT 1,
@@ -239,19 +259,66 @@ export function initDatabase(): void {
       uploaded_by_name TEXT NOT NULL,
       uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS stored_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_uuid TEXT NOT NULL UNIQUE,
+      original_filename TEXT NOT NULL,
+      stored_filename TEXT NOT NULL UNIQUE,
+      extension TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      file_size_bytes INTEGER NOT NULL,
+      sha256_checksum TEXT,
+      module TEXT NOT NULL DEFAULT 'documents',
+      category TEXT NOT NULL DEFAULT 'general',
+      associated_record_type TEXT,
+      associated_record_id INTEGER,
+      description TEXT NOT NULL DEFAULT '',
+      relative_path TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      uploaded_by_user_id INTEGER REFERENCES users(id),
+      uploaded_by_name TEXT NOT NULL,
+      uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
+      is_active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stored_files_module ON stored_files (module, category, is_active);
+
+    CREATE TABLE IF NOT EXISTS file_preview_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_id INTEGER NOT NULL REFERENCES stored_files(id),
+      token_id TEXT NOT NULL UNIQUE,
+      signature_hmac TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      is_revoked INTEGER NOT NULL DEFAULT 0,
+      revoked_at TEXT,
+      revoked_by_user_id INTEGER REFERENCES users(id),
+      revoked_by_name TEXT,
+      revoke_reason TEXT,
+      created_by_user_id INTEGER REFERENCES users(id),
+      created_by_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_accessed_at TEXT,
+      access_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_preview_links_file ON file_preview_links (file_id, is_revoked);
+    CREATE INDEX IF NOT EXISTS idx_preview_links_token ON file_preview_links (token_id);
   `);
 
-  // Idempotent migration: upgrade existing users table if command_room_viewer or must_change_password is absent
+  // Idempotent migration: upgrade existing users table if command_center, command_room_viewer, or must_change_password is absent
   const usersMeta = db
     .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'`)
     .get() as { sql?: string } | undefined;
   const usersSql = usersMeta?.sql ?? '';
   if (
     usersSql &&
-    (!usersSql.includes('command_room_viewer') ||
+    (!usersSql.includes('command_center') ||
+      !usersSql.includes('command_room_viewer') ||
       !usersSql.includes('must_change_password'))
   ) {
     const hasMustChange = usersSql.includes('must_change_password');
+    const hasTokenVersion = usersSql.includes('token_version');
     db.exec('PRAGMA foreign_keys = OFF; BEGIN;');
     try {
       db.exec(`
@@ -261,24 +328,25 @@ export function initDatabase(): void {
           full_name TEXT NOT NULL,
           email TEXT NOT NULL UNIQUE,
           password_hash TEXT NOT NULL,
-          role TEXT NOT NULL CHECK(role IN ('system_admin', 'central_command', 'zone_officer', 'woreda_officer', 'viewer', 'command_room_viewer')),
+          role TEXT NOT NULL CHECK(role IN ('system_admin', 'command_center', 'central_command', 'zone_officer', 'woreda_officer', 'viewer', 'command_room_viewer')),
           assigned_zone TEXT,
           assigned_woreda TEXT,
           is_active INTEGER NOT NULL DEFAULT 1,
           must_change_password INTEGER NOT NULL DEFAULT 0,
+          token_version INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           last_login_at TEXT
         );
         INSERT INTO users_migrated (
           id, username, full_name, email, password_hash, role,
-          assigned_zone, assigned_woreda, is_active, must_change_password,
+          assigned_zone, assigned_woreda, is_active, must_change_password, token_version,
           created_at, last_login_at
         )
         SELECT
           id, username, full_name, email, password_hash, role,
-          assigned_zone, assigned_woreda, is_active, ${
-            hasMustChange ? 'must_change_password' : '0'
-          },
+          assigned_zone, assigned_woreda, is_active,
+          ${hasMustChange ? 'must_change_password' : '0'},
+          ${hasTokenVersion ? 'token_version' : '1'},
           created_at, last_login_at
         FROM users;
         DROP TABLE users;
@@ -297,5 +365,74 @@ export function initDatabase(): void {
   const cols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
   if (!cols.some((c) => c.name === 'token_version')) {
     db.exec(`ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1;`);
+  }
+
+  // Case-insensitive unique indexes prevent duplicate accounts across case variations
+  try {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (lower(username));
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (lower(email));
+    `);
+  } catch {
+    // preserve existing table if legacy case collision exists
+  }
+
+  // Idempotent migration: add stored_file_id to import_batches if absent
+  const batchCols = db.prepare(`PRAGMA table_info(import_batches)`).all() as Array<{ name: string }>;
+  if (!batchCols.some((c) => c.name === 'stored_file_id')) {
+    db.exec(`ALTER TABLE import_batches ADD COLUMN stored_file_id INTEGER;`);
+  }
+
+  // Idempotent migration: expand branding_assets asset_type CHECK constraint & add sha256_checksum
+  const brandingMeta = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'branding_assets'`)
+    .get() as { sql?: string } | undefined;
+  const brandingSql = brandingMeta?.sql ?? '';
+  if (
+    brandingSql &&
+    (!brandingSql.includes('command_center_logo') || !brandingSql.includes('sha256_checksum'))
+  ) {
+    const hasChecksum = brandingSql.includes('sha256_checksum');
+    db.exec('PRAGMA foreign_keys = OFF; BEGIN;');
+    try {
+      db.exec(`
+        CREATE TABLE branding_assets_migrated (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_type TEXT NOT NULL CHECK(asset_type IN ('logo', 'app_logo', 'command_center_logo', 'login_logo', 'header_logo', 'footer_logo', 'favicon', 'login_background', 'visual_asset')),
+          original_filename TEXT NOT NULL,
+          stored_filename TEXT NOT NULL UNIQUE,
+          stored_path TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          file_size_bytes INTEGER NOT NULL,
+          sha256_checksum TEXT,
+          width INTEGER,
+          height INTEGER,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          uploaded_by_user_id INTEGER REFERENCES users(id),
+          uploaded_by_name TEXT NOT NULL,
+          uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO branding_assets_migrated (
+          id, asset_type, original_filename, stored_filename, stored_path,
+          mime_type, file_size_bytes, sha256_checksum, width, height, is_active,
+          uploaded_by_user_id, uploaded_by_name, uploaded_at
+        )
+        SELECT
+          id, asset_type, original_filename, stored_filename, stored_path,
+          mime_type, file_size_bytes,
+          ${hasChecksum ? 'sha256_checksum' : 'NULL'},
+          width, height, is_active,
+          uploaded_by_user_id, uploaded_by_name, uploaded_at
+        FROM branding_assets;
+        DROP TABLE branding_assets;
+        ALTER TABLE branding_assets_migrated RENAME TO branding_assets;
+        COMMIT;
+      `);
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON;');
+    }
   }
 }

@@ -3,6 +3,9 @@ import type {
   AdvancedAnalyticsData,
   AuditLogEntry,
   AuthMeResponse,
+  BackupArchiveInfo,
+  BackupRestoreResult,
+  BrandingAssetType,
   BrandingConfig,
   Campaign,
   CampaignDailyReport,
@@ -10,12 +13,16 @@ import type {
   DailyTrendPoint,
   DashboardKPIs,
   DataQualityWarning,
+  FilePreviewLinkRecord,
   GeoBoundaryRecord,
   ImportBatch,
   ImportMode,
   ImportPreviewPayload,
   LatestImportMeta,
+  PublicFilePreviewInfo,
   PublicOverviewResponse,
+  SpreadsheetPreviewData,
+  StoredFileRecord,
   SurveillanceAlert,
   SystemSettings,
   UserAccount,
@@ -187,7 +194,7 @@ export const api = {
 
   getBranding: () => requestJson<BrandingConfig>('/api/branding'),
 
-  uploadBrandingAsset: async (assetType: 'logo' | 'favicon', file: File) => {
+  uploadBrandingAsset: async (assetType: BrandingAssetType, file: File) => {
     const path = `/api/admin/branding/${assetType}`;
     const fd = new FormData();
     fd.append('file', file);
@@ -203,7 +210,7 @@ export const api = {
     return parseJsonResponse<BrandingConfig>(res, path);
   },
 
-  deleteBrandingAsset: (assetType: 'logo' | 'favicon') =>
+  deleteBrandingAsset: (assetType: BrandingAssetType) =>
     requestJson<BrandingConfig>(`/api/admin/branding/${assetType}`, {
       method: 'DELETE',
     }),
@@ -211,6 +218,66 @@ export const api = {
   restoreBrandingAsset: (id: number) =>
     requestJson<BrandingConfig>(`/api/admin/branding/restore/${id}`, {
       method: 'POST',
+    }),
+
+  resetAllBranding: (confirmationText: string) =>
+    requestJson<BrandingConfig>('/api/admin/branding/reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirmationText }),
+    }),
+
+  listBackups: () => requestJson<BackupArchiveInfo[]>('/api/admin/backups'),
+
+  createBackup: () =>
+    requestJson<BackupArchiveInfo>('/api/admin/backups', {
+      method: 'POST',
+    }),
+
+  backupDownloadUrl: (filename: string) =>
+    apiUrl(`/api/admin/backups/${encodeURIComponent(filename)}/download`),
+
+  restoreBackup: async (params: {
+    file?: File;
+    serverFilename?: string;
+    restoreScope: 'full' | 'branding_and_settings';
+  }): Promise<BackupRestoreResult> => {
+    const path = '/api/admin/backups/restore';
+    if (params.file) {
+      const fd = new FormData();
+      fd.append('file', params.file);
+      fd.append('restoreScope', params.restoreScope);
+      const token = localStorage.getItem('opcms_token');
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(apiUrl(path), {
+        method: 'POST',
+        body: fd,
+        headers,
+        credentials: 'include',
+      });
+      return parseJsonResponse<BackupRestoreResult>(res, path);
+    }
+    return requestJson<BackupRestoreResult>(path, {
+      method: 'POST',
+      body: JSON.stringify({
+        serverFilename: params.serverFilename,
+        restoreScope: params.restoreScope,
+      }),
+    });
+  },
+
+  resetOperationalData: (confirmationText: string, clearStoredVaultFiles = false) =>
+    requestJson<{
+      ok: boolean;
+      deletedReports: number;
+      deletedAlerts: number;
+      deletedBatches: number;
+      deletedVaultFiles: number;
+      brandingPreserved: boolean;
+      settingsPreserved: boolean;
+    }>('/api/admin/operational-reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirmationText, clearStoredVaultFiles }),
     }),
 
   getCampaigns: () => requestJson<Campaign[]>('/api/campaigns'),
@@ -434,4 +501,71 @@ export const api = {
     const sep = q ? '&' : '?';
     return apiUrl(`/api/exports/${reportType}${q}${sep}format=${format}`);
   },
+
+  // Permanent File Storage & 6-Day Secure Live Preview Links
+  listStoredFiles: (params?: { module?: string; category?: string; search?: string }) => {
+    const sp = new URLSearchParams();
+    if (params?.module && params.module !== 'all') sp.set('module', params.module);
+    if (params?.category && params.category !== 'all') sp.set('category', params.category);
+    if (params?.search?.trim()) sp.set('search', params.search.trim());
+    const qs = sp.toString();
+    return requestJson<StoredFileRecord[]>(`/api/files${qs ? `?${qs}` : ''}`);
+  },
+
+  uploadPermanentFile: async (payload: {
+    file: File;
+    module?: string;
+    category?: string;
+    description?: string;
+    associatedRecordType?: string;
+    associatedRecordId?: number;
+  }): Promise<StoredFileRecord> => {
+    const path = '/api/files/upload';
+    const fd = new FormData();
+    fd.append('file', payload.file);
+    fd.append('module', payload.module || 'documents');
+    fd.append('category', payload.category || 'general');
+    if (payload.description) fd.append('description', payload.description);
+    if (payload.associatedRecordType) fd.append('associatedRecordType', payload.associatedRecordType);
+    if (payload.associatedRecordId !== undefined) {
+      fd.append('associatedRecordId', String(payload.associatedRecordId));
+    }
+    const token = localStorage.getItem('opcms_token');
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(apiUrl(path), {
+      method: 'POST',
+      body: fd,
+      headers,
+      credentials: 'include',
+    });
+    return parseJsonResponse<StoredFileRecord>(res, path);
+  },
+
+  getFileViewUrl: (fileId: number) => apiUrl(`/api/files/${fileId}/view`),
+  getFileDownloadUrl: (fileId: number) => apiUrl(`/api/files/${fileId}/download`),
+
+  generatePreviewLink: (fileId: number) =>
+    requestJson<FilePreviewLinkRecord>(`/api/files/${fileId}/preview-links`, {
+      method: 'POST',
+    }),
+
+  revokePreviewLink: (linkId: number, reason?: string) =>
+    requestJson<{ ok: boolean; id: number; isRevoked: boolean }>(
+      `/api/files/preview-links/${linkId}/revoke`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason || 'Revoked by administrator' }),
+      }
+    ),
+
+  getPublicPreviewInfo: (token: string) =>
+    requestJson<PublicFilePreviewInfo>(
+      `/api/files/preview/${encodeURIComponent(token)}`
+    ),
+
+  getPublicPreviewSheet: (token: string) =>
+    requestJson<SpreadsheetPreviewData>(
+      `/api/files/preview/${encodeURIComponent(token)}/sheet`
+    ),
 };

@@ -247,27 +247,12 @@ export const CommandRoomView: React.FC<CommandRoomViewProps> = ({
   const intervalSec = Math.max(5, settings.commandRoomIntervalSec || 15);
 
   const [activeScreenId, setActiveScreenId] = useState<number>(() => {
-    try {
-      const saved = Number(localStorage.getItem('ohb_cr_screen'));
-      if (enabledScreens.includes(saved)) return saved;
-    } catch {
-      // ignore
-    }
     return enabledScreens.includes(settings.commandRoomDefaultScreen)
       ? settings.commandRoomDefaultScreen
       : enabledScreens[0];
   });
 
-  const [paused, setPaused] = useState<boolean>(() => {
-    try {
-      const saved = localStorage.getItem('ohb_cr_paused');
-      if (saved === 'true') return true;
-      if (saved === 'false') return false;
-    } catch {
-      // ignore
-    }
-    return !settings.commandRoomAutoRotate;
-  });
+  const [paused, setPaused] = useState<boolean>(() => !settings.commandRoomAutoRotate);
 
   const [secondsLeft, setSecondsLeft] = useState<number>(intervalSec);
   const [addisClock, setAddisClock] = useState<string>(() =>
@@ -285,15 +270,10 @@ export const CommandRoomView: React.FC<CommandRoomViewProps> = ({
 
   const wasNativeFsRef = useRef(false);
 
-  // Persist viewer rotation preferences locally (never mutates server config)
+  // Sync paused state when server-persisted auto-rotate setting changes
   useEffect(() => {
-    try {
-      localStorage.setItem('ohb_cr_screen', String(activeScreenId));
-      localStorage.setItem('ohb_cr_paused', String(paused));
-    } catch {
-      // ignore
-    }
-  }, [activeScreenId, paused]);
+    setPaused(!settings.commandRoomAutoRotate);
+  }, [settings.commandRoomAutoRotate]);
 
   // Keep activeScreenId inside enabledScreens if Admin updates configuration
   useEffect(() => {
@@ -1615,9 +1595,17 @@ export const CommandRoomView: React.FC<CommandRoomViewProps> = ({
       </div>
 
       {/* COMMAND ROOM FOOTER */}
-      <footer className="bg-white border-t border-slate-200 px-5 py-2 text-xs text-slate-500 flex items-center justify-between shrink-0">
-        <span>Oromia Health Bureau | Polio Campaign Management System</span>
-        <span className="font-mono tabular-nums text-[11px]">
+      <footer className="bg-white border-t border-slate-200 px-5 py-2 text-xs text-slate-500 flex items-center justify-between gap-4 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          {branding?.identity?.showFooterBranding !== false ? (
+            <BrandLogo variant="footer" branding={branding ?? null} />
+          ) : null}
+          <span className="truncate">
+            {branding?.identity?.footerText ||
+              'Oromia Health Bureau | Polio Campaign Management System'}
+          </span>
+        </div>
+        <span className="font-mono tabular-nums text-[11px] shrink-0">
           Screen {currentScreenLabel} of {totalScreensLabel} · Interval {intervalSec}s
         </span>
       </footer>

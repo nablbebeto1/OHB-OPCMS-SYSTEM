@@ -52,7 +52,9 @@ export const GeographicMapView: React.FC<GeographicMapViewProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const canUploadGeo =
-    userRole === 'system_admin' || userRole === 'central_command';
+    userRole === 'system_admin' ||
+    userRole === 'command_center' ||
+    userRole === 'central_command';
 
   // Build lookup maps for zone and woreda metrics
   const zoneLookup = useMemo(() => {

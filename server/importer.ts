@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, UPLOADS_DIR } from './db.ts';
+import { savePermanentFile } from './files.ts';
 import { parseCampaignSpreadsheet } from './parser.ts';
 import { classifyLocationType } from './normalize.ts';
 import { recordAuditLog } from './auth.ts';
@@ -261,6 +262,32 @@ export function confirmStagedImport(params: {
       );
 
     const batchId = Number(batchRes.lastInsertRowid);
+
+    // Also register confirmed import file in permanent stored_files catalog
+    if (fs.existsSync(staged.storedPath)) {
+      const fileBuf = fs.readFileSync(staged.storedPath);
+      const mime =
+        staged.fileFormat === 'csv'
+          ? 'text/csv'
+          : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const perm = savePermanentFile({
+        buffer: fileBuf,
+        originalFilename: staged.originalFilename,
+        mimeType: mime,
+        user: params.user,
+        module: 'imports',
+        category: 'campaign_reports',
+        description:
+          params.notes ?? `Confirmed campaign import batch #${batchId}`,
+        associatedRecordType: 'import_batch',
+        associatedRecordId: batchId,
+        recordAudit: false,
+      });
+      db.prepare('UPDATE import_batches SET stored_file_id = ? WHERE id = ?').run(
+        perm.id,
+        batchId
+      );
+    }
 
     // If replace_period, deactivate existing active records matching campaign + detected days (+ date if specified)
     if (params.importMode === 'replace_period') {
@@ -636,6 +663,10 @@ export function mapImportBatchRow(row: Record<string, unknown>): ImportBatch {
     campaignId: Number(row.campaign_id),
     originalFilename: String(row.original_filename),
     storedPath: String(row.stored_path),
+    storedFileId:
+      row.stored_file_id !== null && row.stored_file_id !== undefined
+        ? Number(row.stored_file_id)
+        : null,
     fileSizeBytes: Number(row.file_size_bytes),
     fileFormat: String(row.file_format),
     detectedTemplate: String(row.detected_template),

@@ -21,6 +21,7 @@ import {
   Radio,
   Tv,
   AlertTriangle,
+  FolderLock,
 } from 'lucide-react';
 import {
   api,
@@ -64,6 +65,8 @@ import {
   ZeroDoseView,
 } from './components/views/IntegrationViews';
 import { DataUploadCenterView } from './components/views/DataUploadCenterView';
+import { DocumentVaultView } from './components/views/DocumentVaultView';
+import { SecurePreviewPage } from './components/views/SecurePreviewPage';
 import { ReportsAnalyticsView } from './components/views/ReportsAnalyticsView';
 import {
   BrandingSettingsPanel,
@@ -84,6 +87,7 @@ type NavKey =
   | 'zero_dose'
   | 'reporting_completeness'
   | 'data_upload'
+  | 'file_vault'
   | 'reports_analytics'
   | 'user_management'
   | 'system_settings'
@@ -102,6 +106,7 @@ const NAV_ICONS: Record<NavKey, React.FC<{ className?: string }>> = {
   zero_dose: Baby,
   reporting_completeness: CheckSquare,
   data_upload: UploadCloud,
+  file_vault: FolderLock,
   reports_analytics: FileText,
   user_management: UserCog,
   system_settings: Settings,
@@ -121,11 +126,22 @@ const NAV_PATHS: Record<NavKey, string> = {
   zero_dose: '/zero-dose',
   reporting_completeness: '/reporting-completeness',
   data_upload: '/data-upload',
+  file_vault: '/files',
   reports_analytics: '/reports-analytics',
   user_management: '/user-management',
   system_settings: '/system-settings',
   branding_appearance: '/branding',
 };
+
+function extractPreviewToken(pathname: string): string | null {
+  const match = pathname.replace(/\/+$/, '').match(/^\/preview\/([^/]+)$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
 
 function navKeyFromPathname(pathname: string): NavKey {
   const normalized = pathname.replace(/\/+$/, '') || '/';
@@ -149,6 +165,9 @@ const GUEST_USER: UserAccount = {
 };
 
 export default function App() {
+  const [previewToken, setPreviewToken] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? extractPreviewToken(window.location.pathname) : null
+  );
   const [activeNav, setActiveNav] = useState<NavKey>(() =>
     typeof window !== 'undefined'
       ? navKeyFromPathname(window.location.pathname)
@@ -214,16 +233,49 @@ export default function App() {
   const canManageBranding =
     authenticated && !mustChangePassword && permissions.includes('manage_branding');
 
-  const applyBrandingUpdate = useCallback((cfg: BrandingConfig) => {
-    setBranding(cfg);
-    const link = document.getElementById('app-favicon') as HTMLLinkElement | null;
-    if (link) {
-      const targetHref =
-        cfg.faviconUrl ||
-        apiUrl(`/api/branding/favicon?v=${encodeURIComponent(cfg.updatedAt || 'default')}`);
-      link.href = targetHref;
+  const applyThemeFromBranding = useCallback((cfg: BrandingConfig | null, contrast = false) => {
+    const root = document.documentElement;
+    if (cfg?.theme) {
+      root.style.setProperty('--color-ohb-deep', cfg.theme.primaryColor || '#485EA9');
+      root.style.setProperty('--color-ohb-blue', cfg.theme.secondaryColor || '#3A99CF');
+      root.style.setProperty('--color-ohb-orange', cfg.theme.accentColor || '#D29441');
+      const fontStack = (name: string) =>
+        name === 'System Sans'
+          ? 'system-ui, -apple-system, sans-serif'
+          : `"${name}", system-ui, -apple-system, sans-serif`;
+      root.style.setProperty('--font-display', fontStack(cfg.theme.displayFont || 'Plus Jakarta Sans'));
+      root.style.setProperty('--font-sans', fontStack(cfg.theme.bodyFont || 'DM Sans'));
+      root.style.fontSize =
+        cfg.theme.fontScale === 'compact'
+          ? '15px'
+          : cfg.theme.fontScale === 'comfortable'
+            ? '17px'
+            : '16px';
     }
+    if (cfg?.identity?.appName) {
+      document.title = cfg.identity.appName;
+    }
+    root.dataset.contrast = contrast ? 'high' : 'normal';
   }, []);
+
+  const applyBrandingUpdate = useCallback(
+    (cfg: BrandingConfig) => {
+      setBranding(cfg);
+      applyThemeFromBranding(cfg, Boolean(summary?.settings?.highContrastMode));
+      const link = document.getElementById('app-favicon') as HTMLLinkElement | null;
+      if (link) {
+        const targetHref =
+          cfg.faviconUrl ||
+          apiUrl(`/api/branding/favicon?v=${encodeURIComponent(cfg.updatedAt || 'default')}`);
+        link.href = targetHref;
+      }
+    },
+    [applyThemeFromBranding, summary?.settings?.highContrastMode]
+  );
+
+  useEffect(() => {
+    applyThemeFromBranding(branding, Boolean(summary?.settings?.highContrastMode));
+  }, [branding, summary?.settings?.highContrastMode, applyThemeFromBranding]);
 
   const applyAuthContext = useCallback((ctx: AuthMeResponse) => {
     setAuthenticated(ctx.authenticated);
@@ -244,7 +296,7 @@ export default function App() {
       setImports([]);
       setBoundaries([]);
       setCampaigns([]);
-      if (window.location.pathname !== '/') {
+      if (!extractPreviewToken(window.location.pathname) && window.location.pathname !== '/') {
         window.history.replaceState(null, '', '/');
         setRouteNotice('Sign in required to access operational dashboards.');
       }
@@ -268,13 +320,21 @@ export default function App() {
     } else {
       const currentFromPath = navKeyFromPathname(window.location.pathname);
       const allowedKeys = new Set((ctx.navigation ?? []).map((n) => n.key));
-      if (!allowedKeys.has(currentFromPath)) {
-        const fallback = (allowedKeys.has('live_command_center')
-          ? 'live_command_center'
-          : (ctx.navigation?.[0]?.key as NavKey | undefined)) ?? 'live_command_center';
-        setActiveNav(fallback);
+      const preferredLanding = (
+        allowedKeys.has(ctx.defaultLanding)
+          ? ctx.defaultLanding
+          : allowedKeys.has('live_command_center')
+            ? 'live_command_center'
+            : ctx.navigation?.[0]?.key ?? 'live_command_center'
+      ) as NavKey;
+
+      if (window.location.pathname === '/' && preferredLanding !== 'live_command_center') {
+        setActiveNav(preferredLanding);
+        window.history.replaceState(null, '', NAV_PATHS[preferredLanding] ?? '/');
+      } else if (!allowedKeys.has(currentFromPath)) {
+        setActiveNav(preferredLanding);
         const origPath = window.location.pathname;
-        window.history.replaceState(null, '', NAV_PATHS[fallback] ?? '/');
+        window.history.replaceState(null, '', NAV_PATHS[preferredLanding] ?? '/');
         if (origPath !== '/' && origPath !== '/login' && origPath !== '/change-password') {
           setRouteNotice(
             `Access restricted: your role (${ctx.user.role}) does not permit access to that module.`
@@ -318,9 +378,23 @@ export default function App() {
 
   // Enforce strict route gating on browser Back/Forward & direct URL entry
   useEffect(() => {
+    const syncPreviewRoute = () => {
+      const tok = extractPreviewToken(window.location.pathname);
+      setPreviewToken(tok);
+    };
+    window.addEventListener('popstate', syncPreviewRoute);
+    return () => window.removeEventListener('popstate', syncPreviewRoute);
+  }, []);
+
+  useEffect(() => {
+    if (previewToken) return;
     if (!authLoaded) return;
 
     const enforceRoute = () => {
+      if (extractPreviewToken(window.location.pathname)) {
+        setPreviewToken(extractPreviewToken(window.location.pathname));
+        return;
+      }
       if (!authenticated) {
         if (window.location.pathname !== '/') {
           window.history.replaceState(null, '', '/');
@@ -360,7 +434,7 @@ export default function App() {
     enforceRoute();
     window.addEventListener('popstate', enforceRoute);
     return () => window.removeEventListener('popstate', enforceRoute);
-  }, [authLoaded, authenticated, mustChangePassword, isCommandRoomViewer, navigation, currentUser.role]);
+  }, [previewToken, authLoaded, authenticated, mustChangePassword, isCommandRoomViewer, navigation, currentUser.role]);
 
   // Keep React fullscreen state synced with browser Escape / fullscreenchange
   useEffect(() => {
@@ -483,6 +557,11 @@ export default function App() {
 
   useEffect(() => {
     fetchBranding();
+    if (previewToken) {
+      setAuthLoaded(true);
+      setLoading(false);
+      return;
+    }
     api
       .getMe()
       .then((res) => {
@@ -492,10 +571,10 @@ export default function App() {
         setAuthLoaded(true);
         setLoading(false);
       });
-  }, [fetchBranding, applyAuthContext]);
+  }, [previewToken, fetchBranding, applyAuthContext]);
 
   useEffect(() => {
-    if (!authenticated || mustChangePassword || isCommandRoomViewer) return;
+    if (previewToken || !authenticated || mustChangePassword || isCommandRoomViewer) return;
     api
       .getCampaigns()
       .then((list) => {
@@ -503,17 +582,24 @@ export default function App() {
         if (list.length > 0) setCampaignId(list[0].id);
       })
       .catch(() => {});
-  }, [authenticated, mustChangePassword, isCommandRoomViewer]);
+  }, [previewToken, authenticated, mustChangePassword, isCommandRoomViewer]);
 
   useEffect(() => {
+    if (previewToken) return;
     fetchAllData();
-  }, [fetchAllData]);
+  }, [previewToken, fetchAllData]);
 
-  // Periodic background data refresh for Command Room large-screen display
+  // Periodic background data refresh governed by persisted DB settings
   useEffect(() => {
     if (!authenticated || mustChangePassword) return;
-    if (activeNav !== 'command_room' && !isCommandRoomViewer) return;
-    const sec = Math.max(10, commandRoomState?.settings.commandRoomDataRefreshSec ?? 30);
+    const isCr = activeNav === 'command_room' || isCommandRoomViewer;
+    if (!isCr && summary?.settings?.liveCommandAutoRefresh === false) return;
+    const sec = Math.max(
+      10,
+      isCr
+        ? commandRoomState?.settings.commandRoomDataRefreshSec ?? 30
+        : summary?.settings?.dashboardAutoRefreshSec ?? 30
+    );
     const timer = window.setInterval(() => {
       fetchAllData();
     }, sec * 1000);
@@ -524,12 +610,14 @@ export default function App() {
     activeNav,
     isCommandRoomViewer,
     commandRoomState?.settings.commandRoomDataRefreshSec,
+    summary?.settings?.dashboardAutoRefreshSec,
+    summary?.settings?.liveCommandAutoRefresh,
     fetchAllData,
   ]);
 
   // Real-time Server-Sent Events subscription (authenticated sessions only)
   useEffect(() => {
-    if (!authenticated || mustChangePassword) {
+    if (previewToken || !authenticated || mustChangePassword) {
       sseConnectedRef.current = false;
       setSseConnected(false);
       return;
@@ -580,7 +668,7 @@ export default function App() {
     return () => {
       es.close();
     };
-  }, [authenticated, mustChangePassword, fetchAllData, fetchBranding, isCommandRoomViewer]);
+  }, [previewToken, authenticated, mustChangePassword, fetchAllData, fetchBranding, isCommandRoomViewer]);
 
   useEffect(() => {
     if (!liveToast) return;
@@ -649,6 +737,10 @@ export default function App() {
   const activeNavItem =
     navigation.find((i) => i.key === activeNav) ?? navigation[0] ?? null;
   const activeCampaign = campaigns.find((c) => c.id === campaignId);
+
+  if (previewToken) {
+    return <SecurePreviewPage token={previewToken} branding={branding} />;
+  }
 
   if (!authLoaded) {
     return (
@@ -725,7 +817,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen flex bg-slate-50 text-slate-900">
+    <div
+      className="min-h-screen flex text-slate-900"
+      style={{ backgroundColor: branding?.theme?.surfaceColor || '#F8FAFC' }}
+    >
       {/* Sidebar Navigation (Generated Strictly From Backend Role Navigation Registry) */}
       <aside
         className={`fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-slate-200 flex flex-col transition-transform lg:static lg:translate-x-0 ${
@@ -736,11 +831,14 @@ export default function App() {
           <div className="flex items-center gap-2.5 min-w-0">
             <BrandLogo variant="sidebar" branding={branding} />
             <div className="min-w-0">
-              <div className="text-sm font-bold tracking-tight text-[#485EA9] truncate">
-                OHB-OPCMS
+              <div
+                className="text-sm font-bold tracking-tight truncate"
+                style={{ color: branding?.theme?.primaryColor || '#485EA9' }}
+              >
+                {branding?.identity?.appShortName || 'OHB-OPCMS'}
               </div>
               <div className="text-[11px] text-slate-500 leading-tight truncate">
-                Oromia Health Bureau
+                {branding?.identity?.organizationName || 'Oromia Health Bureau'}
               </div>
             </div>
           </div>
@@ -764,7 +862,9 @@ export default function App() {
                 key={item.key}
                 type="button"
                 onClick={() => navigateTo(key)}
-                className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors text-left ${
+                className={`w-full flex items-center gap-2.5 px-3 ${
+                  summary?.settings?.uiDensity === 'compact' ? 'py-1.5' : 'py-2'
+                } text-xs font-medium rounded-lg transition-colors text-left ${
                   active
                     ? 'bg-[#3A99CF]/10 text-[#485EA9]'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -815,7 +915,8 @@ export default function App() {
             <BrandLogo variant="header" branding={branding} className="hidden sm:block" />
             <div className="min-w-0">
               <div className="text-xs text-slate-500 truncate">
-                Central Command Center · nOPV2 &amp; bOPV2 SIA
+                {branding?.identity?.appTagline ||
+                  'Central Command Center · nOPV2 & bOPV2 SIA'}
               </div>
               <h1 className="text-base font-semibold text-slate-900 truncate">
                 {activeNavItem?.label ?? 'Live Command Center'}
@@ -1013,7 +1114,7 @@ export default function App() {
 
         {/* Active Module Viewport */}
         <main className="flex-1 p-5 max-w-[1600px] w-full mx-auto">
-          {loading || !summary ? (
+          {loading ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {Array.from({ length: 8 }).map((_, i) => (
                 <div
@@ -1024,7 +1125,7 @@ export default function App() {
             </div>
           ) : (
             <>
-              {activeNav === 'live_command_center' && canViewDashboard ? (
+              {activeNav === 'live_command_center' && canViewDashboard && summary ? (
                 <LiveCommandCenterView
                   summary={summary}
                   advanced={advanced}
@@ -1063,7 +1164,7 @@ export default function App() {
                 />
               ) : null}
 
-              {activeNav === 'command_center' && canViewDashboard ? (
+              {activeNav === 'command_center' && canViewDashboard && summary ? (
                 <CommandCenterView
                   summary={summary}
                   alerts={alerts}
@@ -1074,7 +1175,7 @@ export default function App() {
                 />
               ) : null}
 
-              {activeNav === 'campaign_overview' && canViewDashboard ? (
+              {activeNav === 'campaign_overview' && canViewDashboard && summary ? (
                 <CampaignOverviewView
                   summary={summary}
                   reports={reports}
@@ -1084,7 +1185,7 @@ export default function App() {
                 />
               ) : null}
 
-              {activeNav === 'geographic_performance' && canViewDashboard ? (
+              {activeNav === 'geographic_performance' && canViewDashboard && summary ? (
                 <GeographicMapView
                   summary={summary}
                   reports={reports}
@@ -1099,14 +1200,14 @@ export default function App() {
                 />
               ) : null}
 
-              {activeNav === 'daily_vaccination' && canViewDashboard ? (
+              {activeNav === 'daily_vaccination' && canViewDashboard && summary ? (
                 <DailyVaccinationView
                   summary={summary}
                   vaccineFilter={vaccineType}
                 />
               ) : null}
 
-              {activeNav === 'vaccine_utilization' && canViewDashboard ? (
+              {activeNav === 'vaccine_utilization' && canViewDashboard && summary ? (
                 <VaccineUtilizationView
                   reports={reports}
                   settings={summary.settings}
@@ -1121,15 +1222,15 @@ export default function App() {
                 />
               ) : null}
 
-              {activeNav === 'social_mobilization' && canViewDashboard ? (
+              {activeNav === 'social_mobilization' && canViewDashboard && summary ? (
                 <SocialMobilizationView summary={summary} reports={reports} />
               ) : null}
 
-              {activeNav === 'zero_dose' && canViewDashboard ? (
+              {activeNav === 'zero_dose' && canViewDashboard && summary ? (
                 <ZeroDoseView summary={summary} reports={reports} />
               ) : null}
 
-              {activeNav === 'reporting_completeness' && canViewDashboard ? (
+              {activeNav === 'reporting_completeness' && canViewDashboard && summary ? (
                 <ReportingCompletenessView
                   summary={summary}
                   locations={locations}
@@ -1149,8 +1250,17 @@ export default function App() {
                 />
               ) : null}
 
+              {activeNav === 'file_vault' &&
+              permissions.includes('view_files') ? (
+                <DocumentVaultView
+                  currentUser={currentUser}
+                  permissions={permissions}
+                />
+              ) : null}
+
               {activeNav === 'reports_analytics' &&
-              permissions.includes('export_reports') ? (
+              permissions.includes('export_reports') &&
+              summary ? (
                 <ReportsAnalyticsView summary={summary} filter={filter} />
               ) : null}
 
@@ -1164,7 +1274,8 @@ export default function App() {
               ) : null}
 
               {activeNav === 'system_settings' &&
-              permissions.includes('manage_settings') ? (
+              permissions.includes('manage_settings') &&
+              summary ? (
                 <SystemSettingsView
                   settings={summary.settings}
                   campaigns={campaigns}
@@ -1175,24 +1286,54 @@ export default function App() {
                   onRequireAuth={() => setAuthModalOpen(true)}
                   onUpdated={() => {
                     api.getCampaigns().then(setCampaigns).catch(() => {});
+                    api.getMe().then(applyAuthContext).catch(() => {});
+                    fetchBranding();
                     fetchAllData();
                   }}
-                  onBrandingChanged={applyBrandingUpdate}
+                  onBrandingChanged={(next) => {
+                    applyBrandingUpdate(next);
+                    fetchAllData();
+                  }}
                 />
               ) : null}
 
               {activeNav === 'branding_appearance' && canManageBranding ? (
                 <BrandingSettingsPanel
                   branding={branding}
+                  settings={summary?.settings ?? null}
                   currentUser={currentUser}
                   authenticated={authenticated}
                   onRequireAuth={() => setAuthModalOpen(true)}
-                  onBrandingChanged={applyBrandingUpdate}
+                  onBrandingChanged={(next) => {
+                    applyBrandingUpdate(next);
+                    fetchAllData();
+                  }}
+                  onAppearanceUpdated={() => {
+                    fetchBranding();
+                    fetchAllData();
+                  }}
                 />
               ) : null}
             </>
           )}
         </main>
+
+        <footer className="bg-white border-t border-slate-200 px-5 py-2.5 text-[11px] text-slate-500 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {branding?.identity?.showFooterBranding !== false ? (
+              <BrandLogo variant="footer" branding={branding} />
+            ) : null}
+            <span className="truncate">
+              {branding?.identity?.footerText ||
+                'Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System'}
+            </span>
+          </div>
+          {summary?.settings?.supportContact ? (
+            <span className="font-mono text-slate-400">
+              {summary.settings.supportContact}
+            </span>
+          ) : null}
+        </footer>
       </div>
 
       <AuthModal

@@ -32,6 +32,7 @@ export const CampaignOverviewView: React.FC<CampaignOverviewViewProps> = ({
 
   const canCorrect =
     userRole === 'system_admin' ||
+    userRole === 'command_center' ||
     userRole === 'central_command' ||
     userRole === 'zone_officer';
 

@@ -7,9 +7,15 @@ import {
   XCircle,
   Download,
   RotateCcw,
+  Link2,
+  Copy,
+  Check,
+  Eye,
+  ExternalLink,
 } from 'lucide-react';
 import { api, apiUrl } from '../../api/client';
 import type {
+  FilePreviewLinkRecord,
   ImportBatch,
   ImportMode,
   ImportPreviewPayload,
@@ -48,6 +54,12 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
   const [notes, setNotes] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [rollingBackId, setRollingBackId] = useState<number | null>(null);
+  const [generatingLinkFileId, setGeneratingLinkFileId] = useState<number | null>(null);
+  const [generatedLink, setGeneratedLink] = useState<{
+    filename: string;
+    link: FilePreviewLinkRecord;
+  } | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -112,6 +124,31 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
       setError((err as Error).message);
     } finally {
       setRollingBackId(null);
+    }
+  }
+
+  async function handleGenerateImportPreviewLink(batch: ImportBatch) {
+    if (!batch.storedFileId) return;
+    setGeneratingLinkFileId(batch.storedFileId);
+    setError(null);
+    setCopiedLink(false);
+    try {
+      const link = await api.generatePreviewLink(batch.storedFileId);
+      setGeneratedLink({ filename: batch.originalFilename, link });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setGeneratingLinkFileId(null);
+    }
+  }
+
+  async function handleCopyGeneratedLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    } catch {
+      setError('Copy failed. Please copy the link manually from the box below.');
     }
   }
 
@@ -494,9 +531,62 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
             Import History &amp; Audit Trail ({imports.length})
           </h3>
           <p className="text-xs text-slate-500">
-            Original uploaded files are preserved on local server storage. Administrators can safely roll back an import batch at any time.
+            Original uploaded files are stored permanently in server storage (/var/lib/ohb-opcms/uploads). Administrators can view, generate 6-day read-only live preview links, or roll back an import batch at any time.
           </p>
         </div>
+
+        {generatedLink ? (
+          <div className="mx-5 mt-4 p-3.5 bg-sky-50 border border-[#3A99CF]/40 rounded-lg text-xs space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold text-[#485EA9]">
+                6-Day Live Preview URL Ready · {generatedLink.filename}
+              </div>
+              <div className="text-[11px] text-slate-600">
+                Expires:{' '}
+                <span className="font-mono font-medium text-slate-900">
+                  {new Date(generatedLink.link.expiresAt).toLocaleString()}
+                </span>{' '}
+                (144h)
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <input
+                type="text"
+                readOnly
+                value={generatedLink.link.previewUrl}
+                aria-label="Generated 6-day preview URL"
+                className="flex-1 px-2.5 py-1.5 bg-white border border-slate-300 rounded font-mono text-[11px] text-slate-800"
+              />
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleCopyGeneratedLink(generatedLink.link.previewUrl)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-[#485EA9] hover:bg-[#3a4d8f] text-white rounded font-medium"
+                >
+                  {copiedLink ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedLink ? 'Copied' : 'Copy Link'}
+                </button>
+                <a
+                  href={generatedLink.link.previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded font-medium"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setGeneratedLink(null)}
+                  className="px-2 py-1.5 text-slate-500 hover:text-slate-900"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {imports.length === 0 ? (
           <div className="p-8 text-center text-xs text-slate-500">
             No import batches recorded yet.
@@ -562,7 +652,29 @@ export const DataUploadCenterView: React.FC<DataUploadCenterViewProps> = ({
                         {b.status === 'confirmed' ? 'Active' : 'Rolled Back'}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-2">
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-2.5">
+                      {b.storedFileId ? (
+                        <>
+                          <a
+                            href={api.getFileViewUrl(b.storedFileId)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-slate-700 hover:text-[#485EA9] hover:underline font-medium"
+                          >
+                            <Eye className="w-3 h-3" />
+                            View
+                          </a>
+                          <button
+                            type="button"
+                            disabled={generatingLinkFileId === b.storedFileId}
+                            onClick={() => handleGenerateImportPreviewLink(b)}
+                            className="inline-flex items-center gap-1 text-[#485EA9] hover:underline font-medium disabled:opacity-50"
+                          >
+                            <Link2 className="w-3 h-3" />
+                            {generatingLinkFileId === b.storedFileId ? 'Linking...' : '6-Day Link'}
+                          </button>
+                        </>
+                      ) : null}
                       <a
                         href={apiUrl(`/api/imports/${b.id}/download`)}
                         className="text-[#3A99CF] hover:underline font-medium"

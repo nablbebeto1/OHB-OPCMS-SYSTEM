@@ -38,6 +38,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
 
   const canManageAlerts =
     userRole === 'system_admin' ||
+    userRole === 'command_center' ||
     userRole === 'central_command' ||
     userRole === 'zone_officer';
 

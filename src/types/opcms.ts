@@ -1,5 +1,6 @@
 export type UserRole =
   | 'system_admin'
+  | 'command_center'
   | 'central_command'
   | 'zone_officer'
   | 'woreda_officer'
@@ -160,6 +161,7 @@ export interface ImportBatch {
   campaignId: number;
   originalFilename: string;
   storedPath: string;
+  storedFileId?: number | null;
   fileSizeBytes: number;
   fileFormat: string;
   detectedTemplate: string;
@@ -384,6 +386,7 @@ export interface DailyTrendPoint {
 }
 
 export interface SystemSettings {
+  // Surveillance & Thresholds
   coverageTargetPct: number;
   coverageCriticalPct: number;
   maxWastagePct: number;
@@ -392,6 +395,49 @@ export interface SystemSettings {
   expectedWoredasOverride: number | null;
   googleDriveSyncStatus: 'manual_upload_active';
   guestPublicOverviewEnabled: boolean;
+
+  // General Application Settings
+  appName: string;
+  appShortName: string;
+  organizationName: string;
+  appTagline: string;
+  footerText: string;
+  timezone: string;
+  dateFormat: 'YYYY-MM-DD' | 'DD/MM/YYYY' | 'MMM DD, YYYY';
+  supportContact: string;
+
+  // Branding & Appearance
+  primaryColor: string;
+  secondaryColor: string;
+  accentColor: string;
+  surfaceColor: string;
+  displayFont: 'Plus Jakarta Sans' | 'DM Sans' | 'Inter' | 'System Sans';
+  bodyFont: 'DM Sans' | 'Plus Jakarta Sans' | 'Inter' | 'System Sans';
+  fontScale: 'compact' | 'standard' | 'comfortable';
+  loginTheme: 'clean_light' | 'institutional_gradient';
+
+  // Language Preferences
+  defaultLanguage: 'en' | 'om' | 'am';
+  allowUserLanguageSwitch: boolean;
+
+  // Dashboard Configuration
+  defaultCampaignId: number | null;
+  dashboardAutoRefreshSec: number;
+  showDataQualityBanner: boolean;
+  defaultLandingPage: 'live_command_center' | 'command_center' | 'campaign_overview';
+
+  // Navigation & Module Settings
+  disabledModules: string[];
+  sidebarCollapsedDefault: boolean;
+  showFooterBranding: boolean;
+
+  // User Interface Preferences
+  uiDensity: 'comfortable' | 'compact';
+  tableRowsPerPage: number;
+  showAnimations: boolean;
+  highContrastMode: boolean;
+
+  // Command Center & Command Room Configuration
   commandRoomAutoRotate: boolean;
   commandRoomIntervalSec: number;
   commandRoomEnabledScreens: number[];
@@ -399,6 +445,14 @@ export interface SystemSettings {
   commandRoomFullscreenStartup: boolean;
   commandRoomDataRefreshSec: number;
   commandRoomDisplayTitle: string;
+  liveCommandAutoRefresh: boolean;
+  liveCommandShowTicker: boolean;
+
+  // Upload & File Management Settings
+  maxUploadSizeMb: number;
+  previewLinkTtlHours: number;
+  requireImportConfirmation: boolean;
+  retainArchivedBrandingAssets: boolean;
 }
 
 export interface AuditLogEntry {
@@ -581,7 +635,16 @@ export interface CommandRoomStateResponse {
   }>;
 }
 
-export type BrandingAssetType = 'logo' | 'favicon';
+export type BrandingAssetType =
+  | 'logo'
+  | 'app_logo'
+  | 'command_center_logo'
+  | 'login_logo'
+  | 'header_logo'
+  | 'footer_logo'
+  | 'favicon'
+  | 'login_background'
+  | 'visual_asset';
 
 export interface BrandingAssetMeta {
   id: number;
@@ -590,11 +653,39 @@ export interface BrandingAssetMeta {
   storedFilename: string;
   mimeType: string;
   fileSizeBytes: number;
+  sha256Checksum?: string | null;
   width: number | null;
   height: number | null;
   isActive: boolean;
   uploadedByName: string;
   uploadedAt: string;
+}
+
+export interface BrandingSlotStatus {
+  url: string | null;
+  hasCustom: boolean;
+  meta: BrandingAssetMeta | null;
+}
+
+export interface BrandingIdentityConfig {
+  appName: string;
+  appShortName: string;
+  organizationName: string;
+  appTagline: string;
+  footerText: string;
+  showFooterBranding: boolean;
+  defaultLanguage: 'en' | 'om' | 'am';
+}
+
+export interface BrandingThemeConfig {
+  primaryColor: string;
+  secondaryColor: string;
+  accentColor: string;
+  surfaceColor: string;
+  displayFont: string;
+  bodyFont: string;
+  fontScale: 'compact' | 'standard' | 'comfortable';
+  loginTheme: 'clean_light' | 'institutional_gradient';
 }
 
 export interface BrandingConfig {
@@ -604,8 +695,41 @@ export interface BrandingConfig {
   hasCustomFavicon: boolean;
   logoMeta: BrandingAssetMeta | null;
   faviconMeta: BrandingAssetMeta | null;
+  assets: Partial<Record<BrandingAssetType, BrandingSlotStatus>>;
+  identity: BrandingIdentityConfig;
+  theme: BrandingThemeConfig;
   history?: BrandingAssetMeta[];
   updatedAt: string;
+}
+
+export interface BackupArchiveInfo {
+  filename: string;
+  fileSizeBytes: number;
+  sha256Checksum: string;
+  createdAt: string;
+  createdByName: string;
+  sourceEngine: string;
+  counts: {
+    settings: number;
+    brandingAssets: number;
+    brandingFiles: number;
+    storedFiles: number;
+    dailyReports: number;
+    importBatches: number;
+  };
+}
+
+export interface BackupRestoreResult {
+  ok: boolean;
+  restoreScope: 'full' | 'branding_and_settings';
+  restoredSettings: number;
+  restoredBrandingAssets: number;
+  restoredBrandingFiles: number;
+  restoredStoredFiles: number;
+  restoredReports: number;
+  branding: BrandingConfig;
+  settings: SystemSettings;
+  message: string;
 }
 
 export interface NavMenuItem {
@@ -635,6 +759,82 @@ export interface PublicOverviewResponse {
   submittedWoredas: number;
   serverTimestamp: string;
 }
+
+export type FilePreviewKind =
+  | 'pdf'
+  | 'image'
+  | 'spreadsheet'
+  | 'text'
+  | 'document';
+
+export interface FilePreviewLinkRecord {
+  id: number;
+  fileId: number;
+  tokenId: string;
+  token: string;
+  previewUrl: string;
+  contentUrl: string;
+  expiresAt: string;
+  ttlHours: number;
+  isRevoked: boolean;
+  revokedAt: string | null;
+  revokedByName: string | null;
+  revokeReason: string | null;
+  createdByName: string;
+  createdAt: string;
+  lastAccessedAt: string | null;
+  accessCount: number;
+}
+
+export interface StoredFileRecord {
+  id: number;
+  fileUuid: string;
+  originalFilename: string;
+  storedFilename: string;
+  extension: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  sha256Checksum: string | null;
+  module: string;
+  category: string;
+  associatedRecordType: string | null;
+  associatedRecordId: number | null;
+  description: string;
+  uploadedByName: string;
+  uploadedAt: string;
+  previewKind: FilePreviewKind;
+  activePreviewLinksCount: number;
+  previewLinks: FilePreviewLinkRecord[];
+}
+
+export interface PublicFilePreviewInfo {
+  readOnly: true;
+  fileId: number;
+  originalFilename: string;
+  extension: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  module: string;
+  category: string;
+  description: string;
+  uploadedByName: string;
+  uploadedAt: string;
+  previewKind: FilePreviewKind;
+  expiresAt: string;
+  ttlHours: number;
+  contentUrl: string;
+  downloadReadOnlyUrl: string;
+  sheetPreviewUrl: string | null;
+}
+
+export interface SpreadsheetPreviewData {
+  sheets: Array<{
+    name: string;
+    rows: string[][];
+    truncated: boolean;
+  }>;
+}
+
 
 
 

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import type { Request, Response, NextFunction } from 'express';
 import { db } from './db.ts';
 import type {
@@ -32,13 +33,26 @@ function resolveAuthSecret(): string {
 
 const AUTH_SECRET = resolveAuthSecret();
 
+export function resolvePreviewSigningSecret(): string {
+  const custom = (process.env.FILE_PREVIEW_SECRET || '').trim();
+  if (custom && !INSECURE_SECRETS.has(custom) && custom.length >= 32) {
+    return custom;
+  }
+  if (process.env.NODE_ENV === 'production' && custom) {
+    throw new Error('FILE_PREVIEW_SECRET is invalid or shorter than 32 characters.');
+  }
+  return AUTH_SECRET;
+}
+
 export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
+  return bcrypt.hashSync(password, 12);
 }
 
 export function verifyPassword(password: string, storedHash: string): boolean {
+  if (!storedHash) return false;
+  if (storedHash.startsWith('$2a$') || storedHash.startsWith('$2b$') || storedHash.startsWith('$2y$')) {
+    return bcrypt.compareSync(password, storedHash);
+  }
   const [salt, keyHex] = storedHash.split(':');
   if (!salt || !keyHex) return false;
   const derived = crypto.scryptSync(password, salt, 64);
@@ -128,6 +142,21 @@ export const ROLE_PERMISSIONS: Record<UserRole, Set<string>> = {
     'manage_settings',
     'manage_branding',
     'upload_geo',
+    'view_files',
+    'upload_files',
+    'manage_preview_links',
+    'delete_files',
+  ]),
+  command_center: new Set([
+    'view_dashboard',
+    'view_command_room',
+    'correct_data',
+    'manage_alerts',
+    'export_reports',
+    'upload_geo',
+    'view_files',
+    'upload_files',
+    'manage_preview_links',
   ]),
   central_command: new Set([
     'view_dashboard',
@@ -136,6 +165,9 @@ export const ROLE_PERMISSIONS: Record<UserRole, Set<string>> = {
     'manage_alerts',
     'export_reports',
     'upload_geo',
+    'view_files',
+    'upload_files',
+    'manage_preview_links',
   ]),
   zone_officer: new Set([
     'view_dashboard',
@@ -143,13 +175,21 @@ export const ROLE_PERMISSIONS: Record<UserRole, Set<string>> = {
     'correct_data',
     'manage_alerts',
     'export_reports',
+    'view_files',
+    'upload_files',
   ]),
   woreda_officer: new Set([
     'view_dashboard',
     'view_command_room',
     'export_reports',
+    'view_files',
   ]),
-  viewer: new Set(['view_dashboard', 'view_command_room', 'export_reports']),
+  viewer: new Set([
+    'view_dashboard',
+    'view_command_room',
+    'export_reports',
+    'view_files',
+  ]),
   command_room_viewer: new Set(['view_command_room']),
 };
 
@@ -239,6 +279,13 @@ export const NAV_MODULE_REGISTRY: NavMenuItem[] = [
     requiredPermission: 'upload_data',
   },
   {
+    key: 'file_vault',
+    label: 'Document & File Vault',
+    path: '/files',
+    group: 'admin',
+    requiredPermission: 'view_files',
+  },
+  {
     key: 'reports_analytics',
     label: 'Reports & Analytics',
     path: '/reports-analytics',
@@ -270,7 +317,11 @@ export const NAV_MODULE_REGISTRY: NavMenuItem[] = [
 
 export function buildAuthContext(
   user: UserAccount | undefined | null,
-  guestPublicOverviewEnabled: boolean
+  guestPublicOverviewEnabled: boolean,
+  options?: {
+    disabledModules?: string[];
+    defaultLandingPage?: string;
+  }
 ): AuthMeResponse {
   if (!user) {
     return {
@@ -296,18 +347,27 @@ export function buildAuthContext(
 
   const permsSet = ROLE_PERMISSIONS[user.role] ?? new Set<string>();
   const permissions = Array.from(permsSet);
+  const disabledSet = new Set(options?.disabledModules ?? []);
 
   // Forced first-login password change or Command Room Viewer confinement
   const navigation =
     user.mustChangePassword || user.role === 'command_room_viewer'
       ? []
-      : NAV_MODULE_REGISTRY.filter((item) => permsSet.has(item.requiredPermission));
+      : NAV_MODULE_REGISTRY.filter(
+          (item) => permsSet.has(item.requiredPermission) && !disabledSet.has(item.key)
+        );
+
+  const configuredLanding = options?.defaultLandingPage || 'live_command_center';
+  const navKeys = new Set(navigation.map((n) => n.key));
+  const resolvedLanding = navKeys.has(configuredLanding)
+    ? configuredLanding
+    : navigation[0]?.key || 'live_command_center';
 
   const defaultLanding = user.mustChangePassword
     ? 'change_password'
     : user.role === 'command_room_viewer'
       ? 'command_room'
-      : 'live_command_center';
+      : resolvedLanding;
 
   return {
     authenticated: true,

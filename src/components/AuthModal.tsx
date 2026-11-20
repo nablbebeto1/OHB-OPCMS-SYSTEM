@@ -16,39 +16,6 @@ interface AuthModalProps {
   onAuthenticated: (auth: AuthMeResponse) => void;
 }
 
-const ROLE_PRESETS = [
-  {
-    label: 'System Administrator',
-    username: 'admin',
-    pass: 'OhbAdmin#2026',
-    scope: 'Full system access, Excel/CSV uploads, branding, users & settings',
-  },
-  {
-    label: 'Central Command Center',
-    username: 'command',
-    pass: 'OhbCommand#2026',
-    scope: 'Dashboards, Command Room, data corrections, alert follow-up, GeoJSON',
-  },
-  {
-    label: 'Zone Officer (East Shewa)',
-    username: 'zone_eastshewa',
-    pass: 'OhbZone#2026',
-    scope: 'Dashboards, zone monitoring, corrections, and alert updates',
-  },
-  {
-    label: 'Woreda Officer (Adama)',
-    username: 'woreda_adama',
-    pass: 'OhbWoreda#2026',
-    scope: 'Dashboards and woreda monitoring exports',
-  },
-  {
-    label: 'Read-only Viewer',
-    username: 'viewer',
-    pass: 'OhbViewer#2026',
-    scope: 'View dashboards, Command Room, and export approved reports',
-  },
-];
-
 const SignInForm: React.FC<{
   onAuthenticated: (auth: AuthMeResponse) => void;
   onSuccessClose?: () => void;
@@ -66,6 +33,7 @@ const SignInForm: React.FC<{
     try {
       const res = await api.login(username, password);
       localStorage.setItem('opcms_token', res.token);
+      setPassword('');
       onAuthenticated(res);
       onSuccessClose?.();
     } catch (err) {
@@ -76,7 +44,7 @@ const SignInForm: React.FC<{
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-4" autoComplete="off">
       {error ? (
         <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
           {error}
@@ -92,11 +60,13 @@ const SignInForm: React.FC<{
         </label>
         <input
           id={`${idPrefix}-username`}
+          name="username"
           type="text"
           required
+          autoComplete="username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="e.g. admin or command@oromiahealth.gov.et"
+          placeholder="Enter your username or official email"
           className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
         />
       </div>
@@ -110,11 +80,13 @@ const SignInForm: React.FC<{
         </label>
         <input
           id={`${idPrefix}-password`}
+          name="password"
           type="password"
           required
+          autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="Enter password"
+          placeholder="Enter your password"
           className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:border-[#3A99CF]"
         />
       </div>
@@ -128,34 +100,9 @@ const SignInForm: React.FC<{
       </button>
 
       <div className="pt-3 border-t border-slate-200">
-        <p className="text-xs font-medium text-slate-600 mb-2">
-          Seeded RBAC Accounts (Click to populate credentials):
+        <p className="text-[11px] text-slate-500 leading-relaxed">
+          Authorized Oromia Health Bureau personnel only. Contact your System Administrator if you need an account provisioned or your password reset.
         </p>
-        <div className="space-y-1.5 max-h-44 overflow-y-auto">
-          {ROLE_PRESETS.map((preset) => (
-            <button
-              key={preset.username}
-              type="button"
-              onClick={() => {
-                setUsername(preset.username);
-                setPassword(preset.pass);
-                setError(null);
-              }}
-              className="w-full text-left px-3 py-2 border border-slate-200 hover:border-[#3A99CF] rounded-lg transition-colors"
-            >
-              <div className="flex items-center justify-between text-xs font-medium text-slate-900">
-                <span>{preset.label}</span>
-                <span className="font-mono text-slate-500">{preset.username}</span>
-              </div>
-              <div className="text-[11px] text-slate-500 mt-0.5">{preset.scope}</div>
-            </button>
-          ))}
-        </div>
-        <div className="mt-2.5 text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-3 py-2">
-          <strong>Command Room Large-Screen Viewers:</strong>{' '}
-          <code>COMMAND_ROOM_VIEWER</code> accounts are provisioned by the System Administrator with custom credentials and have display-only access to{' '}
-          <code>/command-room</code>.
-        </div>
       </div>
     </form>
   );
@@ -176,29 +123,65 @@ export const GuestLoginView: React.FC<{
   statusMessage,
   onAuthenticated,
 }) => {
+  const appName =
+    branding?.identity?.appName ||
+    'OROMIA POLIO CAMPAIGN MANAGEMENT SYSTEM (OHB-OPCMS)';
+  const appShortName = branding?.identity?.appShortName || 'OHB-OPCMS';
+  const orgName = branding?.identity?.organizationName || 'Oromia Health Bureau';
+  const tagline =
+    branding?.identity?.appTagline ||
+    'Central Command Center · nOPV2 & bOPV2 Supplementary Immunization Activities';
+  const footerText =
+    branding?.identity?.footerText ||
+    'Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System';
+  const showFooterBranding = branding?.identity?.showFooterBranding !== false;
+  const loginBgUrl = branding?.assets?.login_background?.url ?? null;
+  const visualAssetUrl = branding?.assets?.visual_asset?.url ?? null;
+  const isGradientTheme = branding?.theme?.loginTheme === 'institutional_gradient';
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
-      <header className="bg-white border-b border-slate-200 px-6 py-3.5">
+    <div
+      className="min-h-screen flex flex-col justify-between relative overflow-hidden"
+      style={{
+        backgroundColor: isGradientTheme ? undefined : branding?.theme?.surfaceColor || '#F8FAFC',
+        backgroundImage: isGradientTheme
+          ? `linear-gradient(135deg, ${branding?.theme?.primaryColor || '#485EA9'}14 0%, #FFFFFF 55%, ${branding?.theme?.secondaryColor || '#3A99CF'}18 100%)`
+          : undefined,
+      }}
+    >
+      {loginBgUrl ? (
+        <div
+          className="absolute inset-0 pointer-events-none opacity-15 bg-cover bg-center"
+          style={{ backgroundImage: `url("${loginBgUrl}")` }}
+          aria-hidden="true"
+        />
+      ) : null}
+
+      <header className="relative z-10 bg-white/95 backdrop-blur-sm border-b border-slate-200 px-6 py-3.5">
         <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <BrandLogo variant="header" branding={branding} />
-            <div>
-              <div className="text-sm font-bold tracking-tight text-[#485EA9]">
-                OROMIA POLIO CAMPAIGN MANAGEMENT SYSTEM (OHB-OPCMS)
+            <div className="min-w-0">
+              <div
+                className="text-sm font-bold tracking-tight truncate"
+                style={{ color: branding?.theme?.primaryColor || '#485EA9' }}
+              >
+                {appName}
               </div>
-              <div className="text-xs text-slate-500">
-                Central Command Center · nOPV2 &amp; bOPV2 Supplementary Immunization Activities
-              </div>
+              <div className="text-xs text-slate-500 truncate">{tagline}</div>
             </div>
           </div>
-          <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded">
-            <ShieldCheck className="w-3.5 h-3.5 text-[#485EA9]" />
+          <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded shrink-0">
+            <ShieldCheck
+              className="w-3.5 h-3.5"
+              style={{ color: branding?.theme?.primaryColor || '#485EA9' }}
+            />
             Authenticated Access Only
           </span>
         </div>
       </header>
 
-      <main className="flex-1 flex items-center justify-center p-6">
+      <main className="relative z-10 flex-1 flex items-center justify-center p-6">
         <div
           className={`w-full ${
             guestPublicOverviewEnabled && publicOverview
@@ -215,15 +198,24 @@ export const GuestLoginView: React.FC<{
               <BrandLogo variant="login" branding={branding} />
               <div>
                 <h1 className="text-base font-bold text-slate-900">
-                  OHB-OPCMS Staff Sign In
+                  {appShortName} Staff Sign In
                 </h1>
                 <p className="text-xs text-slate-600 mt-0.5">
-                  Oromia Health Bureau Emergency Operations Center
+                  {orgName} Emergency Operations Center
                 </p>
               </div>
             </div>
 
             <div className="p-6">
+              {visualAssetUrl ? (
+                <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-2 flex items-center justify-center">
+                  <img
+                    src={visualAssetUrl}
+                    alt={`${orgName} Campaign Visual`}
+                    className="max-h-20 w-auto object-contain"
+                  />
+                </div>
+              ) : null}
               {statusMessage ? (
                 <div className="mb-4 p-3 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -304,8 +296,9 @@ export const GuestLoginView: React.FC<{
         </div>
       </main>
 
-      <footer className="border-t border-slate-200 bg-white px-6 py-3 text-center text-[11px] text-slate-500">
-        Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System
+      <footer className="relative z-10 border-t border-slate-200 bg-white/95 px-6 py-3 flex items-center justify-center gap-2.5 text-[11px] text-slate-500">
+        {showFooterBranding ? <BrandLogo variant="footer" branding={branding} /> : null}
+        <span>{footerText}</span>
       </footer>
     </div>
   );
@@ -432,15 +425,26 @@ export const MandatoryPasswordChangeView: React.FC<{
   onPasswordChangedRelogin: (message: string) => void;
   onLogout: () => void;
 }> = ({ branding, currentUser, onPasswordChangedRelogin, onLogout }) => {
+  const appName =
+    branding?.identity?.appName ||
+    'OROMIA POLIO CAMPAIGN MANAGEMENT SYSTEM (OHB-OPCMS)';
+  const footerText =
+    branding?.identity?.footerText ||
+    'Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System';
+  const showFooterBranding = branding?.identity?.showFooterBranding !== false;
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
       <header className="bg-white border-b border-slate-200 px-6 py-3.5">
         <div className="max-w-4xl mx-auto flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <BrandLogo variant="header" branding={branding} />
-            <div>
-              <div className="text-sm font-bold tracking-tight text-[#485EA9]">
-                OROMIA POLIO CAMPAIGN MANAGEMENT SYSTEM (OHB-OPCMS)
+            <div className="min-w-0">
+              <div
+                className="text-sm font-bold tracking-tight truncate"
+                style={{ color: branding?.theme?.primaryColor || '#485EA9' }}
+              >
+                {appName}
               </div>
               <div className="text-xs text-slate-500">
                 Mandatory First-Login Security Verification
@@ -450,7 +454,7 @@ export const MandatoryPasswordChangeView: React.FC<{
           <button
             type="button"
             onClick={onLogout}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg whitespace-nowrap shrink-0"
           >
             <LogOut className="w-3.5 h-3.5" />
             Sign Out ({currentUser.username})
@@ -479,8 +483,9 @@ export const MandatoryPasswordChangeView: React.FC<{
         </div>
       </main>
 
-      <footer className="border-t border-slate-200 bg-white px-6 py-3 text-center text-[11px] text-slate-500">
-        Oromia Health Bureau (OHB) · Self-Hosted Polio Campaign Management System
+      <footer className="border-t border-slate-200 bg-white px-6 py-3 flex items-center justify-center gap-2.5 text-[11px] text-slate-500">
+        {showFooterBranding ? <BrandLogo variant="footer" branding={branding} /> : null}
+        <span>{footerText}</span>
       </footer>
     </div>
   );
@@ -511,7 +516,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 id="auth-modal-title"
                 className="text-base font-semibold text-slate-900 truncate"
               >
-                OHB-OPCMS Staff Sign In
+                {branding?.identity?.appShortName || 'OHB-OPCMS'} Staff Sign In
               </h2>
             </div>
           </div>

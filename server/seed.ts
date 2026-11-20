@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { db } from './db.ts';
 import { hashPassword } from './auth.ts';
+import { DEFAULT_SYSTEM_SETTINGS_MAP } from './analytics.ts';
 import { parseCampaignSpreadsheet } from './parser.ts';
 import { classifyLocationType } from './normalize.ts';
 
@@ -14,88 +15,120 @@ export function getOfficialTemplatePath(): string {
   return OFFICIAL_TEMPLATE_PATH;
 }
 
-export function seedInitialData(): void {
-  // 1. Seed default system settings if empty
-  const defaultSettings: Record<string, string> = {
-    coverageTargetPct: '95',
-    coverageCriticalPct: '80',
-    maxWastagePct: '15',
-    overTargetAlertPct: '105',
-    dailyDeviationPct: '35',
-    expectedWoredasOverride: '',
-    googleDriveSyncStatus: 'manual_upload_active',
-    guestPublicOverviewEnabled: 'false',
-    commandRoomAutoRotate: 'true',
-    commandRoomIntervalSec: '15',
-    commandRoomEnabledScreens: '1,2,3,4,5',
-    commandRoomDefaultScreen: '1',
-    commandRoomFullscreenStartup: 'false',
-    commandRoomDataRefreshSec: '30',
-    commandRoomDisplayTitle: 'Oromia Health Bureau – Polio Campaign Command Room',
-  };
+interface ProvisionSpec {
+  username: string;
+  fullName: string;
+  email: string;
+  password: string;
+  role: 'system_admin' | 'command_center';
+}
 
+export function provisionConfiguredAccounts(options?: {
+  forceSync?: boolean;
+}): { adminStatus: string; commandStatus: string } {
+  const forceSync =
+    options?.forceSync ?? process.env.OPCMS_FORCE_SYNC_INIT_ACCOUNTS === 'true';
+
+  const specs: ProvisionSpec[] = [
+    {
+      username: (process.env.OPCMS_INIT_ADMIN_USERNAME || 'Admin').trim(),
+      fullName: 'OHB System Administrator',
+      email: (process.env.OPCMS_INIT_ADMIN_EMAIL || 'admin@oromiahealth.gov.et').trim(),
+      password: process.env.OPCMS_INIT_ADMIN_PASSWORD || '',
+      role: 'system_admin',
+    },
+    {
+      username: (process.env.OPCMS_INIT_COMMAND_USERNAME || 'OHBPHEM').trim(),
+      fullName: 'Oromia PHEM Central Command Center',
+      email: (process.env.OPCMS_INIT_COMMAND_EMAIL || 'ohbphem@oromiahealth.gov.et').trim(),
+      password: process.env.OPCMS_INIT_COMMAND_PASSWORD || '',
+      role: 'command_center',
+    },
+  ];
+
+  const results: string[] = [];
+
+  for (const spec of specs) {
+    const existing = db
+      .prepare(
+        `SELECT id, username, role, must_change_password FROM users WHERE lower(username) = lower(?)`
+      )
+      .get(spec.username) as
+      | {
+          id: number;
+          username: string;
+          role: string;
+          must_change_password: number;
+        }
+      | undefined;
+
+    if (existing) {
+      const shouldSyncPassword =
+        Boolean(spec.password) &&
+        (forceSync ||
+          (spec.role === 'system_admin' && existing.username !== spec.username));
+
+      if (shouldSyncPassword) {
+        db.prepare(
+          `UPDATE users
+           SET username = ?, role = ?, is_active = 1,
+               password_hash = ?, must_change_password = 1,
+               token_version = token_version + 1
+           WHERE id = ?`
+        ).run(
+          spec.username,
+          spec.role,
+          hashPassword(spec.password),
+          existing.id
+        );
+        results.push(`${spec.username}:updated_credentials_and_role`);
+      } else {
+        db.prepare(
+          `UPDATE users SET username = ?, role = ?, is_active = 1 WHERE id = ?`
+        ).run(spec.username, spec.role, existing.id);
+        results.push(`${spec.username}:preserved`);
+      }
+      continue;
+    }
+
+    if (!spec.password) {
+      console.warn(
+        `[OHB-OPCMS] Initial password env var not set for "${spec.username}"; skipping creation.`
+      );
+      results.push(`${spec.username}:skipped_no_env_password`);
+      continue;
+    }
+
+    db.prepare(
+      `INSERT INTO users (username, full_name, email, password_hash, role, assigned_zone, assigned_woreda, is_active, must_change_password, token_version)
+       VALUES (?, ?, ?, ?, ?, NULL, NULL, 1, 1, 1)`
+    ).run(
+      spec.username,
+      spec.fullName,
+      spec.email,
+      hashPassword(spec.password),
+      spec.role
+    );
+    results.push(`${spec.username}:created`);
+  }
+
+  return {
+    adminStatus: results[0] ?? 'unknown',
+    commandStatus: results[1] ?? 'unknown',
+  };
+}
+
+export function seedInitialData(): void {
+  // 1. Seed default system settings if missing (never overwrites administrator-saved settings)
   const insertSetting = db.prepare(
     'INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)'
   );
-  for (const [k, v] of Object.entries(defaultSettings)) {
+  for (const [k, v] of Object.entries(DEFAULT_SYSTEM_SETTINGS_MAP)) {
     insertSetting.run(k, v);
   }
 
-  // 2. Seed initial RBAC accounts if no users exist
-  const userCount = (
-    db.prepare('SELECT COUNT(*) AS cnt FROM users').get() as { cnt: number }
-  ).cnt;
-  if (userCount === 0) {
-    const insertUser = db.prepare(
-      `INSERT INTO users (username, full_name, email, password_hash, role, assigned_zone, assigned_woreda)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    );
-    insertUser.run(
-      'admin',
-      'Dr. Tadesse Bekele (System Admin)',
-      'admin@oromiahealth.gov.et',
-      hashPassword('OhbAdmin#2026'),
-      'system_admin',
-      null,
-      null
-    );
-    insertUser.run(
-      'command',
-      'Sifan Gemechu (Central Command)',
-      'command@oromiahealth.gov.et',
-      hashPassword('OhbCommand#2026'),
-      'central_command',
-      null,
-      null
-    );
-    insertUser.run(
-      'zone_eastshewa',
-      'Bonsa Alemu (East Shewa Officer)',
-      'eastshewa@oromiahealth.gov.et',
-      hashPassword('OhbZone#2026'),
-      'zone_officer',
-      'East Shewa',
-      null
-    );
-    insertUser.run(
-      'woreda_adama',
-      'Chaltu Regassa (Adama Woreda)',
-      'adama@oromiahealth.gov.et',
-      hashPassword('OhbWoreda#2026'),
-      'woreda_officer',
-      'East Shewa',
-      'Adama'
-    );
-    insertUser.run(
-      'viewer',
-      'OHB Partner Observer',
-      'viewer@oromiahealth.gov.et',
-      hashPassword('OhbViewer#2026'),
-      'viewer',
-      null,
-      null
-    );
-  }
+  // 2. Provision configured accounts safely from environment variables (without hardcoding secrets)
+  provisionConfiguredAccounts();
 
   // 3. Seed Round 1 campaign if empty
   const campaignCount = (
