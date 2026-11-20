@@ -119,12 +119,19 @@ export function provisionConfiguredAccounts(options?: {
 }
 
 export function seedInitialData(): void {
-  // 1. Seed default system settings if missing (never overwrites administrator-saved settings)
+  // 1. Seed default system settings if missing in a single transaction (never overwrites administrator-saved settings)
   const insertSetting = db.prepare(
     'INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)'
   );
-  for (const [k, v] of Object.entries(DEFAULT_SYSTEM_SETTINGS_MAP)) {
-    insertSetting.run(k, v);
+  db.exec('BEGIN');
+  try {
+    for (const [k, v] of Object.entries(DEFAULT_SYSTEM_SETTINGS_MAP)) {
+      insertSetting.run(k, v);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
   }
 
   // 2. Provision configured accounts safely from environment variables (without hardcoding secrets)

@@ -1,6 +1,11 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type { Request, Response, NextFunction } from 'express';
+import {
+  getRuntimeConfig,
+  initializeRuntimeConfig,
+  type RuntimeConfig,
+} from './config.ts';
 import { db } from './db.ts';
 import type {
   AuthMeResponse,
@@ -9,39 +14,21 @@ import type {
   UserRole,
 } from '../src/types/opcms.ts';
 
-const INSECURE_SECRETS = new Set([
-  '',
-  'change-this-to-a-long-random-hex-secret',
-  'change-this-to-a-long-random-secret',
-  'ohb-opcms-self-hosted-session-signing-key-2026',
-  'secret',
-  'changeme',
-]);
+let activeAuthConfig: RuntimeConfig | null = null;
 
-function resolveAuthSecret(): string {
-  const configured = (process.env.SECRET_KEY || process.env.OPCMS_SESSION_SECRET || '').trim();
-  if (configured && !INSECURE_SECRETS.has(configured) && configured.length >= 32) {
-    return configured;
-  }
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      'SECRET_KEY (or OPCMS_SESSION_SECRET) must be configured with >= 32 random characters in production.'
-    );
-  }
-  return configured || 'ohb-opcms-dev-session-signing-key-2026';
+export function initializeAuthRuntime(config?: RuntimeConfig): RuntimeConfig {
+  activeAuthConfig = config ?? initializeRuntimeConfig();
+  return activeAuthConfig;
 }
 
-const AUTH_SECRET = resolveAuthSecret();
+function getAuthSecret(): string {
+  const cfg = activeAuthConfig ?? getRuntimeConfig();
+  return cfg.authSecret;
+}
 
 export function resolvePreviewSigningSecret(): string {
-  const custom = (process.env.FILE_PREVIEW_SECRET || '').trim();
-  if (custom && !INSECURE_SECRETS.has(custom) && custom.length >= 32) {
-    return custom;
-  }
-  if (process.env.NODE_ENV === 'production' && custom) {
-    throw new Error('FILE_PREVIEW_SECRET is invalid or shorter than 32 characters.');
-  }
-  return AUTH_SECRET;
+  const cfg = activeAuthConfig ?? getRuntimeConfig();
+  return cfg.previewSecret;
 }
 
 export function hashPassword(password: string): string {
@@ -67,6 +54,7 @@ export function signSessionToken(user: {
   role: UserRole;
   tokenVersion?: number;
 }): string {
+  const secret = getAuthSecret();
   const payload = {
     sub: user.id,
     username: user.username,
@@ -76,7 +64,7 @@ export function signSessionToken(user: {
   };
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto
-    .createHmac('sha256', AUTH_SECRET)
+    .createHmac('sha256', secret)
     .update(encoded)
     .digest('base64url');
   return `${encoded}.${sig}`;
@@ -91,11 +79,16 @@ export function verifySessionToken(token: string): {
   try {
     const [encoded, sig] = token.split('.');
     if (!encoded || !sig) return null;
+    const secret = getAuthSecret();
     const expectedSig = crypto
-      .createHmac('sha256', AUTH_SECRET)
+      .createHmac('sha256', secret)
       .update(encoded)
       .digest('base64url');
-    if (sig !== expectedSig) return null;
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expectedBuf = Buffer.from(expectedSig, 'utf8');
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return null;
+    }
     const parsed = JSON.parse(
       Buffer.from(encoded, 'base64url').toString('utf8')
     );

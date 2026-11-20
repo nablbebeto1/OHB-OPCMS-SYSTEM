@@ -1,16 +1,20 @@
-import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import shp from 'shpjs';
-import { createServer as createViteServer } from 'vite';
+import {
+  initializeRuntimeConfig,
+  logSafeDiagnosticSnapshot,
+  type RuntimeConfig,
+} from './server/config.ts';
 import { db, initDatabase } from './server/db.ts';
 import { seedInitialData, getOfficialTemplatePath } from './server/seed.ts';
 import {
   attachSessionUser,
   buildAuthContext,
   hashPassword,
+  initializeAuthRuntime,
   mapUserRow,
   recordAuditLog,
   requirePermission,
@@ -83,12 +87,26 @@ import type {
 } from './src/types/opcms.ts';
 import * as XLSX from 'xlsx';
 
+// 1. Load & validate runtime configuration BEFORE database, auth, or protected routes
+let runtimeConfig: RuntimeConfig;
+try {
+  runtimeConfig = initializeRuntimeConfig();
+  logSafeDiagnosticSnapshot(runtimeConfig);
+} catch (err) {
+  console.error(`[OHB-OPCMS Startup Error] ${(err as Error).message}`);
+  process.exit(1);
+}
+
+// 2. Initialize database schema & fast baseline seeding
 initDatabase();
 seedInitialData();
 
+// 3. Initialize authentication runtime before registering routes
+initializeAuthRuntime(runtimeConfig);
+
 const app = express();
-const PORT = Number(process.env.PORT ?? 3000);
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB ?? 25);
+const PORT = runtimeConfig.port;
+const MAX_UPLOAD_MB = runtimeConfig.maxUploadMb;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -114,7 +132,27 @@ function parseFilter(req: express.Request): AnalyticsFilter {
 
 // ---------- Health & Public Branding ----------
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'ohb-opcms', timestamp: new Date().toISOString() });
+  try {
+    const row = db.prepare('SELECT 1 AS ok').get() as { ok?: number } | undefined;
+    if (!row || row.ok !== 1) {
+      res.status(503).json({ status: 'error', service: 'ohb-opcms', db: 'unavailable' });
+      return;
+    }
+    res.json({
+      status: 'ok',
+      service: 'ohb-opcms',
+      db: 'connected',
+      uptimeSec: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'error',
+      service: 'ohb-opcms',
+      db: 'error',
+      error: (err as Error).message,
+    });
+  }
 });
 
 app.get('/api/branding', (req: AuthenticatedRequest, res) => {
@@ -1736,13 +1774,36 @@ app.post(
 
 // ---------- Vite Dev Middleware or Static Production Build ----------
 async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
+  if (runtimeConfig.isProduction) {
     const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distDir));
+    const indexHtmlPath = path.join(distDir, 'index.html');
+    if (!fs.existsSync(indexHtmlPath)) {
+      console.error(
+        `[OHB-OPCMS Startup Error] Production frontend bundle missing at ${indexHtmlPath}. Run "npm run build" before starting in production.`
+      );
+      process.exit(1);
+    }
+
+    app.use('/api/*', (_req, res) => {
+      res.status(404).json({ error: 'API endpoint not found.' });
+    });
+
+    app.use(
+      express.static(distDir, {
+        maxAge: '1d',
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(indexHtmlPath);
     });
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1750,11 +1811,19 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(
-      `OHB-OPCMS server running at http://0.0.0.0:${PORT} (NODE_ENV=${process.env.NODE_ENV ?? 'development'})`
+      `OHB-OPCMS server listening on http://0.0.0.0:${PORT} (NODE_ENV=${runtimeConfig.nodeEnv})`
     );
+  });
+
+  server.on('error', (err) => {
+    console.error(`[OHB-OPCMS HTTP Server Error] ${(err as Error).message}`);
+    process.exit(1);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error(`[OHB-OPCMS Fatal Startup Error] ${(err as Error).message}`);
+  process.exit(1);
+});

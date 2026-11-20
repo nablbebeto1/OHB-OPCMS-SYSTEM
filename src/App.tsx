@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LayoutDashboard,
   ClipboardList,
@@ -51,28 +51,97 @@ import {
   MandatoryPasswordChangeView,
 } from './components/AuthModal';
 import { BrandLogo } from './components/BrandLogo';
-import { LiveCommandCenterView } from './components/views/LiveCommandCenterView';
-import { CommandRoomView } from './components/views/CommandRoomView';
-import { CommandCenterView } from './components/views/CommandCenterView';
-import { CampaignOverviewView } from './components/views/CampaignOverviewView';
-import { GeographicMapView } from './components/views/GeographicMapView';
-import { DailyVaccinationView } from './components/views/DailyVaccinationView';
-import { VaccineUtilizationView } from './components/views/VaccineUtilizationView';
-import { AlertsView } from './components/views/AlertsView';
-import {
-  ReportingCompletenessView,
-  SocialMobilizationView,
-  ZeroDoseView,
-} from './components/views/IntegrationViews';
-import { DataUploadCenterView } from './components/views/DataUploadCenterView';
-import { DocumentVaultView } from './components/views/DocumentVaultView';
-import { SecurePreviewPage } from './components/views/SecurePreviewPage';
-import { ReportsAnalyticsView } from './components/views/ReportsAnalyticsView';
-import {
-  BrandingSettingsPanel,
-  SystemSettingsView,
-  UserManagementView,
-} from './components/views/AdminViews';
+
+const LiveCommandCenterView = lazy(() =>
+  import('./components/views/LiveCommandCenterView').then((m) => ({
+    default: m.LiveCommandCenterView,
+  }))
+);
+const CommandRoomView = lazy(() =>
+  import('./components/views/CommandRoomView').then((m) => ({
+    default: m.CommandRoomView,
+  }))
+);
+const CommandCenterView = lazy(() =>
+  import('./components/views/CommandCenterView').then((m) => ({
+    default: m.CommandCenterView,
+  }))
+);
+const CampaignOverviewView = lazy(() =>
+  import('./components/views/CampaignOverviewView').then((m) => ({
+    default: m.CampaignOverviewView,
+  }))
+);
+const GeographicMapView = lazy(() =>
+  import('./components/views/GeographicMapView').then((m) => ({
+    default: m.GeographicMapView,
+  }))
+);
+const DailyVaccinationView = lazy(() =>
+  import('./components/views/DailyVaccinationView').then((m) => ({
+    default: m.DailyVaccinationView,
+  }))
+);
+const VaccineUtilizationView = lazy(() =>
+  import('./components/views/VaccineUtilizationView').then((m) => ({
+    default: m.VaccineUtilizationView,
+  }))
+);
+const AlertsView = lazy(() =>
+  import('./components/views/AlertsView').then((m) => ({
+    default: m.AlertsView,
+  }))
+);
+const ReportingCompletenessView = lazy(() =>
+  import('./components/views/IntegrationViews').then((m) => ({
+    default: m.ReportingCompletenessView,
+  }))
+);
+const SocialMobilizationView = lazy(() =>
+  import('./components/views/IntegrationViews').then((m) => ({
+    default: m.SocialMobilizationView,
+  }))
+);
+const ZeroDoseView = lazy(() =>
+  import('./components/views/IntegrationViews').then((m) => ({
+    default: m.ZeroDoseView,
+  }))
+);
+const DataUploadCenterView = lazy(() =>
+  import('./components/views/DataUploadCenterView').then((m) => ({
+    default: m.DataUploadCenterView,
+  }))
+);
+const DocumentVaultView = lazy(() =>
+  import('./components/views/DocumentVaultView').then((m) => ({
+    default: m.DocumentVaultView,
+  }))
+);
+const SecurePreviewPage = lazy(() =>
+  import('./components/views/SecurePreviewPage').then((m) => ({
+    default: m.SecurePreviewPage,
+  }))
+);
+const ReportsAnalyticsView = lazy(() =>
+  import('./components/views/ReportsAnalyticsView').then((m) => ({
+    default: m.ReportsAnalyticsView,
+  }))
+);
+const BrandingSettingsPanel = lazy(() =>
+  import('./components/views/AdminViews').then((m) => ({
+    default: m.BrandingSettingsPanel,
+  }))
+);
+const SystemSettingsView = lazy(() =>
+  import('./components/views/AdminViews').then((m) => ({
+    default: m.SystemSettingsView,
+  }))
+);
+const UserManagementView = lazy(() =>
+  import('./components/views/AdminViews').then((m) => ({
+    default: m.UserManagementView,
+  }))
+);
 
 type NavKey =
   | 'live_command_center'
@@ -739,7 +808,17 @@ export default function App() {
   const activeCampaign = campaigns.find((c) => c.id === campaignId);
 
   if (previewToken) {
-    return <SecurePreviewPage token={previewToken} branding={branding} />;
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-slate-50 flex items-center justify-center text-sm text-slate-600">
+            Loading Secure Document Preview...
+          </div>
+        }
+      >
+        <SecurePreviewPage token={previewToken} branding={branding} />
+      </Suspense>
+    );
   }
 
   if (!authLoaded) {
@@ -1124,7 +1203,18 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <>
+            <Suspense
+              fallback={
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {[1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      className="h-24 bg-white border border-slate-200 rounded-lg animate-pulse"
+                    />
+                  ))}
+                </div>
+              }
+            >
               {activeNav === 'live_command_center' && canViewDashboard && summary ? (
                 <LiveCommandCenterView
                   summary={summary}
@@ -1314,7 +1404,7 @@ export default function App() {
                   }}
                 />
               ) : null}
-            </>
+            </Suspense>
           )}
         </main>
 
